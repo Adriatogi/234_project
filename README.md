@@ -1,120 +1,193 @@
-# Legal LLM Bias Analysis
+# LLM Sycophancy & Demographic Bias Analysis
 
-Measuring racial and gender bias in LLM legal reasoning using counterfactual demographic injection on MMLU Professional Law questions.
+Measuring how LLMs defer to incorrect suggestions depending on the perceived demographic identity of the authority figure and the subject of the question. Tested across legal (MMLU Professional Law) and medical (MedQA USMLE) domains.
 
-Inspired by ["How Can We Diagnose and Treat Bias in Large Language Models for Clinical Decision-Making?"](https://arxiv.org/html/2410.16574v1), adapted from the medical domain to legal reasoning.
+Inspired by ["How Can We Diagnose and Treat Bias in Large Language Models for Clinical Decision-Making?"](https://arxiv.org/html/2410.16574v1), adapted and extended with a sycophancy ladder that isolates the effects of authority, race, gender, and their intersections.
 
 ## Approach
 
-1. **Filter** 1,183 bar-exam-style MCQs from MMLU Professional Law that contain person-centric fact patterns
-2. **Inject** counterfactual demographics (5 races x 2 genders = 10 variants + 1 neutral = 13,013 total variants)
-3. **Run inference** through LLMs via [litellm](https://docs.litellm.ai/) (Together AI, or local via vllm-mlx)
-4. **Analyze** whether protected characteristics cause models to change their answers
+The pipeline has four stages:
 
-Demographics tested: White, Black, Asian, Hispanic, Arab x Male, Female
+1. **Filter** person-centric MCQs from MMLU Professional Law and MedQA that contain fact patterns involving specific individuals
+2. **Baseline inference** — run the model with chain-of-thought to find questions it answers correctly
+3. **Wrong-COT generation** — for each correctly-answered question, generate a plausible-but-incorrect chain-of-thought justifying a wrong answer
+4. **Sycophancy injection** — present the wrong COT back to the model under different authority/demographic conditions and measure whether it caves
+
+### Sycophancy Ladder
+
+Each question is tested with 14 variants:
+
+| Layer | Variant | What it tests |
+|---|---|---|
+| 1 | Plain user | Baseline sycophancy — does the model defer to any pushback? |
+| 2 | Neutral authority | "A lawyer/doctor says..." — does an authority title increase deference? |
+| 3a | Demographic authority (race x gender) | "A Black female doctor says..." — does the authority's identity matter? |
+| 3b | Gender-only authority | "A female doctor says..." — isolated gender effect |
+| 3c | Race-only authority | "A Black doctor says..." — isolated race effect |
+| 4 | Person demographic | Neutral authority, but the patient/defendant's race and gender are injected into the question text |
+
+Demographics tested: White, Black x Male, Female (on authority); extended to Asian, Hispanic, Arab for Experiment 1 (counterfactual analysis).
 
 ## Setup
 
 ```bash
-# Clone the repo
 git clone <repo-url>
 cd 234_project
 
-# Create and activate venv
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Configure API keys
 cp .env.example .env
-# Edit .env with your TOGETHERAI_API_KEY
+# Edit .env with your TOGETHERAI_API_KEY (and optionally HF_TOKEN)
 ```
 
-## Usage
+## Full Pipeline
 
 ### 1. Download datasets
 
 ```bash
 python data/download_mmlu_professional_law.py   # MMLU Professional Law (1,533 MCQs)
-python data/download_legalbench.py               # LegalBench (162 legal tasks)
-python data/download_medquad.py                  # MedQuAD (47k medical QA pairs)
+python data/download_medqa.py                   # MedQA USMLE (1,273 MCQs)
 ```
 
-### 2. Prepare counterfactual variants
+### 2. Filter person-centric questions
 
 ```bash
-python src/filter_questions.py          # Filter for person-centric questions
-python src/inject_demographics.py       # Create demographic variants
+python src/filter_data.py --domain legal     # -> data/filtered_questions.jsonl
+python src/filter_data.py --domain medical   # -> data/filtered_medqa.jsonl
 ```
 
-### 3. Run inference
+### 3. Run baseline COT inference
+
+Get chain-of-thought answers on the raw questions to identify which ones the model gets right:
 
 ```bash
-# Test run (2 questions, 22 variants)
-python src/run_inference.py --prompt baseline --limit 2
-
-# Full run with baseline prompt
-python src/run_inference.py --prompt baseline
-
-# With explanation prompt
-python src/run_inference.py --prompt with_explanation
-
-# With debiasing prompt
-python src/run_inference.py --prompt debiasing
-
-# Use a different model
-python src/run_inference.py --model together_ai/mistralai/Mixtral-8x7B-Instruct-v0.1
+python src/inference.py baseline --domain legal --model "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo" --batch-size 20
+python src/inference.py baseline --domain medical --model "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo" --batch-size 20
 ```
 
-### 4. Analyze results
+Output: `data/results/baseline_cot_{model}_{domain}.jsonl`
+
+### 4. Generate wrong COTs
+
+For each question the model answered correctly, generate a convincing-but-wrong chain-of-thought:
 
 ```bash
-python src/analyze_results.py                    # Analyze all result files
-python src/analyze_results.py --file data/results/specific_file.csv
+python src/inference.py wrong-cot --domain legal --baseline data/results/baseline_cot_together_ai_meta-llama_Meta-Llama-3.1-8B-Instruct-Turbo_legal.jsonl --batch-size 20
+python src/inference.py wrong-cot --domain medical --baseline data/results/baseline_cot_together_ai_meta-llama_Meta-Llama-3.1-8B-Instruct-Turbo_medical.jsonl --batch-size 20
 ```
+
+Output: `data/wrong_cots_{model}_{domain}.jsonl`
+
+### 5. Create sycophancy test variants
+
+Build the 14-variant sycophancy ladder for each question:
+
+```bash
+python src/inject.py sycophancy --domain legal
+python src/inject.py sycophancy --domain medical
+```
+
+Use `--model-safe` if the wrong COTs were generated by a different model than the default:
+
+```bash
+python src/inject.py sycophancy --domain legal --model-safe together_ai_Qwen_Qwen2.5-7B-Instruct-Turbo
+```
+
+Output: `data/sycophancy_variants_{domain}.jsonl`
+
+### 6. Run sycophancy inference
+
+Present each variant to the model and record whether it defers:
+
+```bash
+python src/inference.py sycophancy --input data/sycophancy_variants_legal.jsonl --model "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo" --batch-size 20
+python src/inference.py sycophancy --input data/sycophancy_variants_medical.jsonl --model "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo" --batch-size 20
+```
+
+Output: `data/results/sycophancy_{model}_{domain}.jsonl`
+
+Useful flags:
+- `--limit N` — only process the first N questions
+- `--question-ids 1,5,10` — run specific question IDs
+- `--prompt {sycophancy,baseline,with_explanation,debiasing}` — choose prompt template
+
+### 7. Analyze results
+
+```bash
+python src/analyze.py sycophancy --file data/results/sycophancy_together_ai_meta-llama_Meta-Llama-3.1-8B-Instruct-Turbo_legal.jsonl
+python src/analyze.py sycophancy --file data/results/sycophancy_together_ai_meta-llama_Meta-Llama-3.1-8B-Instruct-Turbo_medical.jsonl
+```
+
+Or auto-discover all sycophancy result files:
+
+```bash
+python src/analyze.py sycophancy
+```
+
+For Experiment 1 (demographic counterfactual — does injecting demographics into the question text change accuracy?):
+
+```bash
+python src/analyze.py experiment1 --file data/results/together_ai_..._baseline.jsonl
+python src/analyze.py experiment1   # auto-discover
+```
+
+Output: `data/results/analysis_sycophancy_{model}_{domain}.csv` (per-question deference breakdown)
 
 ## Inference Providers
 
-**Together AI (cloud):** Default. Set `TOGETHERAI_API_KEY` in `.env`. Default model: `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`.
+**Together AI (cloud):** Default. Set `TOGETHERAI_API_KEY` in `.env`. Uses [litellm](https://docs.litellm.ai/) for routing. Default model: `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`.
 
-**Local via vllm-mlx (Apple Silicon):** Install `vllm-mlx`, start a local server, then point litellm at it:
+```bash
+# Any Together AI model works — just use the together_ai/ prefix:
+--model "together_ai/Qwen/Qwen2.5-7B-Instruct-Turbo"
+--model "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+```
+
+**Local via vllm-mlx (Apple Silicon):**
+
 ```bash
 pip install vllm-mlx
 vllm-mlx serve mlx-community/Llama-3.1-8B-Instruct-4bit
 # In another terminal:
-python src/run_inference.py --model openai/mlx-community/Llama-3.1-8B-Instruct-4bit
+python src/inference.py baseline --domain legal --model openai/mlx-community/Llama-3.1-8B-Instruct-4bit
 ```
 
 ## Project Structure
 
 ```
 234_project/
-├── .env.example              # API key template
-├── requirements.txt          # Python dependencies
+├── .env.example                 # API key template
+├── requirements.txt             # Python dependencies
+├── findings.md                  # Informal writeup of key findings
 ├── data/
-│   ├── download_*.py         # Dataset download scripts
+│   ├── download_*.py            # Dataset download scripts
 │   ├── mmlu_professional_law.csv
-│   ├── filtered_questions.csv
-│   ├── counterfactual_questions.csv
-│   └── results/              # Inference outputs and analysis
+│   ├── medqa.csv
+│   ├── filtered_questions.jsonl       # Filtered legal questions
+│   ├── filtered_medqa.jsonl           # Filtered medical questions
+│   ├── sycophancy_variants_legal.jsonl
+│   ├── sycophancy_variants_medical.jsonl
+│   ├── wrong_cots_*.jsonl             # Generated wrong COTs
+│   └── results/                       # Inference outputs and analysis CSVs
 ├── src/
-│   ├── filter_questions.py   # Filter injectable questions
-│   ├── inject_demographics.py # Create counterfactual variants
-│   ├── run_inference.py      # LLM inference via litellm
-│   ├── analyze_results.py    # Bias analysis and statistics
-│   └── prompts/
-│       ├── baseline.txt
-│       ├── with_explanation.txt
-│       └── debiasing.txt
-├── diagnose_treat_bias_llm/  # Reference: medical bias paper code
-├── legalbench/               # Reference: legal reasoning benchmark
-└── MedQuAD/                  # Reference: medical QA dataset
+│   ├── utils.py                 # Shared constants, JSONL I/O, answer extraction, Cramer's V
+│   ├── prompts.py               # All prompt templates and demographic constants
+│   ├── filter_data.py           # Filter questions for demographic injection suitability
+│   ├── inject.py                # Create counterfactual + sycophancy variants
+│   ├── inference.py             # LLM inference (baseline, wrong-COT, sycophancy)
+│   └── analyze.py               # Statistical analysis (deference rates, Cramer's V, chi-squared)
 ```
+
+## Models Tested
+
+| Model | Legal | Medical |
+|---|---|---|
+| Meta-LLaMA 3.1 8B Instruct Turbo | 500 questions | 306 questions |
+| Qwen 2.5 7B Instruct Turbo | 261 questions | 297 questions |
 
 ## Reference Datasets
 
 - **MMLU Professional Law** — 1,533 bar-exam MCQs ([HuggingFace](https://huggingface.co/datasets/brucewlee1/mmlu-professional-law))
-- **LegalBench** — 162 legal reasoning tasks ([GitHub](https://github.com/HazyResearch/legalbench))
-- **MedQuAD** — 47k medical QA pairs ([GitHub](https://github.com/abachaa/MedQuAD))
+- **MedQA USMLE** — 1,273 USMLE-style MCQs ([HuggingFace](https://huggingface.co/datasets/GBaker/MedQA-USMLE-4-options))
