@@ -1,0 +1,14 @@
+requests
+beautifulsoup4
+cloudscraper
+pandas
+numpy
+scipy
+nltk
+rouge-score
+scikit-learn
+jupyter
+datasets
+lxml
+python-dotenv
+litellm
