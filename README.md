@@ -36,10 +36,16 @@ cd 234_project
 
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install .
 
 cp .env.example .env
 # Edit .env with your TOGETHERAI_API_KEY (and optionally HF_TOKEN)
+```
+
+For local GPU inference with vLLM:
+
+```bash
+pip install ".[local]"
 ```
 
 ## Full Pipeline
@@ -145,7 +151,22 @@ Output: `data/results/analysis_sycophancy_{model}_{domain}.csv` (per-question de
 --model "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
 ```
 
-**Local via vllm-mlx (Apple Silicon):**
+**Local with vLLM (requires NVIDIA GPU):**
+
+```bash
+pip install ".[local]"
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000
+```
+
+Then in another terminal, run inference against the local server:
+
+```bash
+export OPENAI_API_BASE=http://localhost:8000/v1
+python src/inference.py sycophancy --input data/sycophancy_variants_legal.jsonl \
+  --model "openai/Qwen/Qwen2.5-7B-Instruct" --batch-size 20
+```
+
+**Local via vllm-mlx (Apple Silicon, no NVIDIA GPU):**
 
 ```bash
 pip install vllm-mlx
@@ -159,7 +180,7 @@ python src/inference.py baseline --domain legal --model openai/mlx-community/Lla
 ```
 234_project/
 ├── .env.example                 # API key template
-├── requirements.txt             # Python dependencies
+├── pyproject.toml               # Python dependencies (pip install . / pip install ".[local]")
 ├── findings.md                  # Informal writeup of key findings
 ├── data/
 │   ├── download_*.py            # Dataset download scripts

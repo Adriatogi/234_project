@@ -1,0 +1,30 @@
+[project]
+name = "sycophancy-bias"
+version = "0.1.0"
+description = "Measuring sycophancy and demographic bias in LLM reasoning across legal and medical domains"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "beautifulsoup4",
+    "cloudscraper",
+    "pandas",
+    "numpy",
+    "scipy",
+    "nltk",
+    "rouge-score",
+    "scikit-learn",
+    "jupyter",
+    "datasets",
+    "lxml",
+    "python-dotenv",
+    "litellm",
+]
+
+[project.optional-dependencies]
+local = [
+    "vllm",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
