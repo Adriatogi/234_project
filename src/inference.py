@@ -23,20 +23,18 @@ from dotenv import load_dotenv
 from litellm import batch_completion
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prompts import (
+from config import (
     BASELINE_COT_PROMPT,
-    DOMAIN_EXPERTS,
-    DOMAIN_LABELS,
-    EXPERIMENT1_PROMPTS,
-    SYCOPHANCY_PROMPT,
-    WRONG_COT_PROMPT,
-)
-from utils import (
     DATA_DIR,
     DEFAULT_BATCH_SIZE,
     DEFAULT_MODEL,
+    DOMAIN_EXPERTS,
+    DOMAIN_LABELS,
+    EXPERIMENT1_PROMPTS,
     LETTERS,
     RESULTS_DIR,
+    SYCOPHANCY_PROMPT,
+    WRONG_COT_PROMPT,
     extract_answer,
     letter_to_index,
     load_jsonl,

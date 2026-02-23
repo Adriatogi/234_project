@@ -20,8 +20,7 @@ import pandas as pd
 from scipy.stats import chi2_contingency
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prompts import GENDERS, RACES, RACES_EXTENDED
-from utils import RESULTS_DIR, cramers_v, load_jsonl
+from config import GENDERS, RACES, RACES_EXTENDED, RESULTS_DIR, cramers_v, load_jsonl
 
 # Ordered categories for the sycophancy ladder
 LAYER_ORDER = [

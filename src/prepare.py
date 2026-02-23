@@ -1,16 +1,21 @@
 """
-Injection pipeline with two subcommands.
+Data preparation pipeline with three subcommands.
 
 Usage:
-    python src/inject.py demographics --domain legal
-    python src/inject.py sycophancy --domain legal
+    python src/prepare.py filter --domain legal
+    python src/prepare.py filter --domain medical
+    python src/prepare.py demographics --domain legal
+    python src/prepare.py sycophancy --domain legal
 
-Outputs (all JSONL):
-    data/counterfactual_questions_{domain}.jsonl  (demographics subcommand)
-    data/sycophancy_variants_{domain}.jsonl       (sycophancy subcommand)
+Outputs:
+    data/filtered_questions.jsonl           (filter, legal)
+    data/filtered_medqa.jsonl               (filter, medical)
+    data/counterfactual_questions_{domain}.jsonl  (demographics)
+    data/sycophancy_variants_{domain}.jsonl       (sycophancy)
 """
 
 import argparse
+import ast
 import os
 import re
 import sys
@@ -18,16 +23,165 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from prompts import AUTHORITY_ROLES, GENDERS, RACES, RACES_EXTENDED
-from utils import DATA_DIR, load_jsonl, safe_model_name, save_jsonl
+from config import (
+    AUTHORITY_ROLES,
+    DATA_DIR,
+    GENDERS,
+    RACES,
+    RACES_EXTENDED,
+    load_jsonl,
+    parse_options,
+    safe_model_name,
+    save_jsonl,
+)
+
+
+# ===================================================================
+# FILTER subcommand — select person-centric questions
+# ===================================================================
+
+LEGAL_PERSON_KEYWORDS = [
+    "a man", "a woman", "a boy", "a girl", "a person",
+    "the man", "the woman", "the boy", "the girl",
+    "defendant", "plaintiff", "suspect", "accused",
+    "petitioner", "respondent", "appellant",
+    "employee", "employer", "worker",
+    "landlord", "tenant", "lessee", "lessor",
+    "buyer", "seller", "vendor", "purchaser",
+    "driver", "motorist", "pedestrian",
+    "patient", "client", "customer",
+    "homeowner", "resident", "neighbor",
+    "student", "teacher", "professor",
+    "year-old", "years old",
+]
+
+LEGAL_EXCLUDE_PATTERNS = [
+    r"^which of the following",
+    r"^under the",
+    r"^the \w+ amendment",
+    r"^according to",
+]
+
+MEDICAL_PERSON_KEYWORDS = [
+    "year-old", "years old", "month-old", "months old",
+    "day-old", "week-old",
+    "a man", "a woman", "a boy", "a girl",
+    "the man", "the woman", "the boy", "the girl",
+    "a male", "a female",
+    "patient", "infant", "newborn", "neonate",
+    "child", "adolescent", "teenager",
+    "presents to", "brought to", "comes to",
+    "is admitted", "is referred",
+]
+
+MEDICAL_EXCLUDE_PATTERNS = [
+    r"^which of the following",
+    r"^what is the",
+    r"^what are the",
+    r"^which enzyme",
+    r"^which vitamin",
+    r"^which receptor",
+    r"^which drug",
+    r"^which hormone",
+    r"^which structure",
+    r"^which type",
+    r"^the__(most|least|best|primary)",
+]
+
+
+def has_person_reference(text: str, keywords: list[str]) -> bool:
+    """Check if the question text contains references to specific people."""
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in keywords)
+
+
+def is_excluded(text: str, patterns: list[str]) -> bool:
+    """Check if question matches an exclusion pattern (doctrine/factual only)."""
+    text_lower = text.lower().strip()
+    return any(re.match(pat, text_lower) for pat in patterns)
+
+
+def filter_legal():
+    """Filter MMLU Professional Law questions."""
+    input_path = os.path.join(DATA_DIR, "mmlu_professional_law.csv")
+    output_path = os.path.join(DATA_DIR, "filtered_questions.jsonl")
+
+    df = pd.read_csv(input_path)
+    print(f"Total MMLU Professional Law questions: {len(df)}")
+
+    rows = []
+    for idx, row in df.iterrows():
+        options = parse_options(row["options"])
+        correct = ast.literal_eval(row["correct_options"])[0]
+        text = row["centerpiece"]
+
+        if not has_person_reference(text, LEGAL_PERSON_KEYWORDS):
+            continue
+        if is_excluded(text, LEGAL_EXCLUDE_PATTERNS):
+            continue
+
+        rows.append({
+            "question_id": idx,
+            "question_text": text,
+            "options": options,
+            "correct_answer": correct,
+        })
+
+    out_df = pd.DataFrame(rows)
+    save_jsonl(out_df, output_path)
+
+    print(f"Questions with person references: {len(out_df)}")
+    print(f"Saved to {output_path}")
+
+    print("\n--- Sample filtered questions ---")
+    for i in range(min(5, len(out_df))):
+        row = out_df.iloc[i]
+        print(f"\nQ{row['question_id']} (answer: {row['correct_answer']}):")
+        print(f"  {row['question_text'][:200]}...")
+
+
+def filter_medical():
+    """Filter MedQA questions."""
+    input_path = os.path.join(DATA_DIR, "medqa.csv")
+    output_path = os.path.join(DATA_DIR, "filtered_medqa.jsonl")
+
+    df = pd.read_csv(input_path)
+    print(f"Total MedQA questions: {len(df)}")
+
+    rows = []
+    for idx, row in df.iterrows():
+        options = parse_options(row["options"])
+        text = row["question"]
+
+        if not has_person_reference(text, MEDICAL_PERSON_KEYWORDS):
+            continue
+        if is_excluded(text, MEDICAL_EXCLUDE_PATTERNS):
+            continue
+
+        rows.append({
+            "question_id": idx,
+            "question_text": text,
+            "options": options,
+            "correct_answer": row["answer_idx"],
+        })
+
+    out_df = pd.DataFrame(rows)
+    save_jsonl(out_df, output_path)
+
+    print(f"Questions with patient references: {len(out_df)}")
+    print(f"Saved to {output_path}")
+
+    print("\n--- Sample filtered questions ---")
+    for i in range(min(5, len(out_df))):
+        row = out_df.iloc[i]
+        print(f"\nQ{row['question_id']} (answer: {row['correct_answer']}):")
+        print(f"  {row['question_text'][:200]}...")
 
 
 # ===================================================================
 # Shared: demographic injection into question text
 # ===================================================================
 
-# Inline injection rules: (pattern, replacement_template)
-# Applied in order; first match wins.
 INLINE_RULES = [
     (r"(\b\d+)-year-old man\b", r"\1-year-old {race} man"),
     (r"(\b\d+)-year-old woman\b", r"\1-year-old {race} woman"),
@@ -86,7 +240,6 @@ def run_demographics(domain: str):
         options = row["options"]
         correct = row["correct_answer"]
 
-        # Neutral variant (original)
         rows.append({
             "question_id": question_id,
             "variant": "neutral",
@@ -97,14 +250,12 @@ def run_demographics(domain: str):
             "correct_answer": correct,
         })
 
-        # Track injection method
         test_injected = inject_demographic(text, "White", "male")
         if test_injected.startswith("Assume"):
             prepend_count += 1
         else:
             inline_count += 1
 
-        # Demographic variants (extended race list for Experiment 1)
         for race in RACES_EXTENDED:
             for gender in GENDERS:
                 injected = inject_demographic(text, race, gender)
@@ -132,7 +283,6 @@ def run_demographics(domain: str):
     print(f"Prepend injection: {prepend_count} questions")
     print(f"Saved to {output_path}")
 
-    # Show injection examples
     print("\n--- Inline injection example ---")
     for _, row in df.iterrows():
         test = inject_demographic(row["question_text"], "Black", "male")
@@ -181,7 +331,6 @@ def run_sycophancy(domain: str, model_safe: str):
         wrong = wc_row["wrong_answer"]
         wrong_cot = wc_row["wrong_cot"]
 
-        # --- User ---
         rows.append({
             "question_id": qid,
             "variant": "sycophancy_user",
@@ -196,7 +345,6 @@ def run_sycophancy(domain: str, model_safe: str):
             "domain": domain,
         })
 
-        # --- Neutral Authority ---
         rows.append({
             "question_id": qid,
             "variant": "sycophancy_authority",
@@ -211,7 +359,6 @@ def run_sycophancy(domain: str, model_safe: str):
             "domain": domain,
         })
 
-        # --- Demographic Authority (race x gender) ---
         for race in RACES:
             for gender in GENDERS:
                 rows.append({
@@ -228,7 +375,6 @@ def run_sycophancy(domain: str, model_safe: str):
                     "domain": domain,
                 })
 
-        # --- Gender-Only Authority ---
         for gender in GENDERS:
             rows.append({
                 "question_id": qid,
@@ -244,7 +390,6 @@ def run_sycophancy(domain: str, model_safe: str):
                 "domain": domain,
             })
 
-        # --- Race-Only Authority ---
         for race in RACES:
             rows.append({
                 "question_id": qid,
@@ -260,7 +405,6 @@ def run_sycophancy(domain: str, model_safe: str):
                 "domain": domain,
             })
 
-        # --- Person Demographic (neutral authority + demographics on subject) ---
         for race in RACES:
             for gender in GENDERS:
                 injected_text = inject_demographic(question_text, race, gender)
@@ -294,12 +438,10 @@ def run_sycophancy(domain: str, model_safe: str):
     print(f"Total variants: {len(out_df)}")
     print(f"Saved to {output_path}")
 
-    # Show variant breakdown
     print(f"\n--- Variant counts ---")
     for v, count in out_df["variant"].value_counts().sort_index().items():
         print(f"  {v}: {count}")
 
-    # Show a Layer 5 example
     person_rows = out_df[out_df["variant"].str.startswith("sycophancy_person")]
     if len(person_rows) > 0:
         ex = person_rows.iloc[0]
@@ -314,16 +456,17 @@ def run_sycophancy(domain: str, model_safe: str):
 # ===================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Injection pipeline")
+    parser = argparse.ArgumentParser(description="Data preparation pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # -- demographics --
+    p_filter = subparsers.add_parser("filter", help="Filter questions for demographic injection")
+    p_filter.add_argument("--domain", required=True, choices=["legal", "medical"])
+
     p_demo = subparsers.add_parser(
         "demographics", help="Create Experiment 1 counterfactual variants"
     )
     p_demo.add_argument("--domain", required=True, choices=["legal", "medical"])
 
-    # -- sycophancy --
     p_syc = subparsers.add_parser(
         "sycophancy", help="Create sycophancy test variants from wrong COTs"
     )
@@ -335,7 +478,12 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "demographics":
+    if args.command == "filter":
+        if args.domain == "legal":
+            filter_legal()
+        elif args.domain == "medical":
+            filter_medical()
+    elif args.command == "demographics":
         run_demographics(domain=args.domain)
     elif args.command == "sycophancy":
         run_sycophancy(domain=args.domain, model_safe=args.model_safe)
