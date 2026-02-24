@@ -6,6 +6,9 @@ Usage:
     python src/inference.py wrong-cot --domain legal --baseline <path> --batch-size 20
     python src/inference.py sycophancy --input <path> --batch-size 20
 
+    # Local GPU inference via vLLM:
+    python src/inference.py baseline --domain legal --backend vllm --model Qwen/Qwen2.5-7B-Instruct
+
 Outputs (all JSONL):
     data/results/baseline_cot_{model}_{domain}.jsonl
     data/wrong_cots_{model}_{domain}.jsonl
@@ -20,34 +23,144 @@ import sys
 
 import pandas as pd
 from dotenv import load_dotenv
-from litellm import batch_completion
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import (
-    BASELINE_COT_PROMPT,
-    DATA_DIR,
-    DEFAULT_BATCH_SIZE,
-    DEFAULT_MODEL,
-    DOMAIN_EXPERTS,
-    DOMAIN_LABELS,
-    EXPERIMENT1_PROMPTS,
-    LETTERS,
-    RESULTS_DIR,
-    SYCOPHANCY_PROMPT,
-    WRONG_COT_PROMPT,
-    extract_answer,
-    letter_to_index,
-    load_jsonl,
-    parse_options,
-    safe_model_name,
-    save_results,
-)
+import config
 
-load_dotenv(os.path.join(DATA_DIR, "..", ".env"))
+load_dotenv(os.path.join(config.DATA_DIR, "..", ".env"))
+
+
+# ===================================================================
+# Backend abstraction — litellm (cloud API) vs vllm (local GPU)
+# ===================================================================
+
+class _VLLMResponse:
+    """Wraps vLLM output to match the litellm/OpenAI response shape."""
+    def __init__(self, text: str):
+        self.choices = [type("Choice", (), {"message": type("Msg", (), {"content": text})()})]
+
+
+_vllm_instance = None
+
+
+def _init_backend(backend: str, model: str):
+    """Initialize the inference backend. For vllm, loads the model into GPU."""
+    global _vllm_instance
+    if backend == "vllm":
+        from vllm import LLM
+        _vllm_instance = LLM(model=model)
+        print(f"vLLM: loaded {model}")
+
+
+def run_batch(
+    backend: str,
+    model: str,
+    messages_batch: list[list[dict]],
+    max_tokens: int,
+    temperature: float,
+) -> list:
+    """Run a batch of chat completions through the selected backend.
+
+    Returns a list of response objects (or Exceptions) with
+    .choices[0].message.content for each input.
+    """
+    if backend == "litellm":
+        from litellm import batch_completion
+        return batch_completion(
+            model=model, messages=messages_batch,
+            max_tokens=max_tokens, temperature=temperature,
+        )
+
+    if backend == "vllm":
+        from vllm import SamplingParams
+        params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
+        outputs = _vllm_instance.chat(messages_batch, params)
+        return [_VLLMResponse(o.outputs[0].text) for o in outputs]
+
+    raise ValueError(f"Unknown backend: {backend}")
+
+
+# ===================================================================
+# Resume + generic batch loop
+# ===================================================================
+
+def _load_existing(
+    output_path: str, dedup_cols: list[str],
+) -> tuple[pd.DataFrame | None, set]:
+    """Load previously saved results for resume support."""
+    if not os.path.exists(output_path):
+        return None, set()
+    existing_df = config.load_jsonl(output_path)
+    existing_df = existing_df.drop_duplicates(subset=dedup_cols, keep="first")
+    if len(dedup_cols) == 1:
+        done = set(existing_df[dedup_cols[0]])
+    else:
+        done = set(zip(*(existing_df[c] for c in dedup_cols)))
+    print(f"Resuming: {len(done)} already completed")
+    return existing_df, done
+
+
+def _run_inference(
+    pending: list[tuple],
+    output_path: str,
+    existing_df: pd.DataFrame | None,
+    backend: str,
+    model: str,
+    batch_size: int,
+    max_tokens: int,
+    total_count: int,
+    build_result: callable,
+    build_error: callable,
+) -> list[dict]:
+    """Generic batch-inference loop with progress and incremental saves.
+
+    pending:      [(context, prompt), ...] -- context is passed through to build fns
+    build_result: (context, response_text) -> dict
+    build_error:  (context, error_string) -> dict
+    """
+    results: list[dict] = []
+    already_done = total_count - len(pending)
+    errors = 0
+
+    for batch_start in range(0, len(pending), batch_size):
+        chunk = pending[batch_start:batch_start + batch_size]
+        messages_batch = [[{"role": "user", "content": prompt}] for _, prompt in chunk]
+
+        responses = run_batch(
+            backend, model, messages_batch,
+            max_tokens=max_tokens, temperature=0.0,
+        )
+
+        for (ctx, _), response in zip(chunk, responses):
+            if isinstance(response, Exception):
+                errors += 1
+                results.append(build_error(ctx, str(response)))
+            else:
+                text = response.choices[0].message.content
+                results.append(build_result(ctx, text))
+
+        completed = len(results) + already_done
+        pct = completed / total_count * 100
+        print(f"  Batch {batch_start // batch_size + 1}: "
+              f"{completed}/{total_count} ({pct:.1f}%) | Errors: {errors}")
+        config.save_results(results, output_path, existing_df)
+
+    print(f"\nDone! {len(results) + already_done} completed. Errors: {errors}")
+    print(f"Saved to {output_path}")
+    return results
+
 
 DOMAIN_INPUTS = {
-    "legal": os.path.join(DATA_DIR, "mmlu_professional_law.csv"),
-    "medical": os.path.join(DATA_DIR, "medqa.csv"),
+    "legal": {
+        "file": os.path.join(config.DATA_DIR, "mmlu_professional_law.csv"),
+        "text_col": "centerpiece",
+        "correct_fn": lambda row: ast.literal_eval(row["correct_options"])[0],
+    },
+    "medical": {
+        "file": os.path.join(config.DATA_DIR, "medqa.csv"),
+        "text_col": "question",
+        "correct_fn": lambda row: row["answer_idx"],
+    },
 }
 
 
@@ -60,36 +173,18 @@ def load_questions(domain: str) -> pd.DataFrame:
 
     Returns DataFrame with: question_id, question_text, options (list), correct_answer
     """
-    path = DOMAIN_INPUTS[domain]
-    df = pd.read_csv(path)
+    cfg = DOMAIN_INPUTS[domain]
+    df = pd.read_csv(cfg["file"])
 
-    if domain == "legal":
-        rows = []
-        for idx, row in df.iterrows():
-            options = parse_options(row["options"])
-            correct = ast.literal_eval(row["correct_options"])[0]
-            rows.append({
-                "question_id": idx,
-                "question_text": row["centerpiece"],
-                "options": options,
-                "correct_answer": correct,
-            })
-        return pd.DataFrame(rows)
-
-    elif domain == "medical":
-        rows = []
-        for idx, row in df.iterrows():
-            options = parse_options(row["options"])
-            rows.append({
-                "question_id": idx,
-                "question_text": row["question"],
-                "options": options,
-                "correct_answer": row["answer_idx"],
-            })
-        return pd.DataFrame(rows)
-
-    else:
-        raise ValueError(f"Unknown domain: {domain}")
+    rows = []
+    for idx, row in df.iterrows():
+        rows.append({
+            "question_id": idx,
+            "question_text": row[cfg["text_col"]],
+            "options": config.parse_options(row["options"]),
+            "correct_answer": cfg["correct_fn"](row),
+        })
+    return pd.DataFrame(rows)
 
 
 def extract_cot(response_text: str) -> str:
@@ -104,8 +199,8 @@ def extract_cot(response_text: str) -> str:
 
 
 def format_baseline_prompt(domain: str, question: str, options: list[str]) -> str:
-    return BASELINE_COT_PROMPT.format(
-        domain_expert=DOMAIN_EXPERTS[domain],
+    return config.BASELINE_COT_PROMPT.format(
+        domain_expert=config.DOMAIN_EXPERTS[domain],
         question=question,
         option_a=options[0],
         option_b=options[1],
@@ -114,27 +209,22 @@ def format_baseline_prompt(domain: str, question: str, options: list[str]) -> st
     )
 
 
-def run_baseline(domain: str, model: str, limit: int | None, batch_size: int):
+def run_baseline(domain: str, model: str, limit: int | None, batch_size: int, backend: str):
     df = load_questions(domain)
     if limit is not None:
         df = df.head(limit)
 
     print(f"Domain:     {domain}")
     print(f"Model:      {model}")
+    print(f"Backend:    {backend}")
     print(f"Questions:  {len(df)}")
     print(f"Batch size: {batch_size}")
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    model_safe = safe_model_name(model)
-    output_path = os.path.join(RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl")
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    model_safe = config.safe_model_name(model)
+    output_path = os.path.join(config.RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl")
 
-    existing_df = None
-    completed_ids = set()
-    if os.path.exists(output_path):
-        existing_df = load_jsonl(output_path)
-        existing_df = existing_df.drop_duplicates(subset=["question_id"], keep="first")
-        completed_ids = set(existing_df["question_id"])
-        print(f"Resuming: {len(completed_ids)} questions already completed")
+    existing_df, completed_ids = _load_existing(output_path, ["question_id"])
 
     pending = []
     for _, row in df.iterrows():
@@ -148,69 +238,45 @@ def run_baseline(domain: str, model: str, limit: int | None, batch_size: int):
         print("Nothing to do.")
         return
 
-    results = []
-    errors = 0
+    def _result(row, text):
+        answer = config.extract_answer(text)
+        return {
+            "question_id": row["question_id"],
+            "question_text": row["question_text"],
+            "options": row["options"],
+            "correct_answer": row["correct_answer"],
+            "model_answer": answer,
+            "is_correct": answer == row["correct_answer"],
+            "model_cot": extract_cot(text),
+            "raw_response": text,
+            "domain": domain,
+            "model": model,
+        }
 
-    for batch_start in range(0, len(pending), batch_size):
-        chunk = pending[batch_start:batch_start + batch_size]
-        messages_batch = [[{"role": "user", "content": p}] for _, p in chunk]
+    def _error(row, err):
+        return {
+            "question_id": row["question_id"],
+            "question_text": row["question_text"],
+            "options": row["options"],
+            "correct_answer": row["correct_answer"],
+            "model_answer": "ERROR",
+            "is_correct": False,
+            "model_cot": "",
+            "raw_response": err,
+            "domain": domain,
+            "model": model,
+        }
 
-        responses = batch_completion(
-            model=model, messages=messages_batch,
-            max_tokens=1024, temperature=0.0,
-        )
+    results = _run_inference(
+        pending, output_path, existing_df, backend, model,
+        batch_size, max_tokens=1024, total_count=len(df),
+        build_result=_result, build_error=_error,
+    )
 
-        for (row, _), response in zip(chunk, responses):
-            if isinstance(response, Exception):
-                errors += 1
-                print(f"  Error on Q{row['question_id']}: {response}")
-                results.append({
-                    "question_id": row["question_id"],
-                    "question_text": row["question_text"],
-                    "options": row["options"],
-                    "correct_answer": row["correct_answer"],
-                    "model_answer": "ERROR",
-                    "is_correct": False,
-                    "model_cot": "",
-                    "raw_response": str(response),
-                    "domain": domain,
-                    "model": model,
-                })
-                continue
-
-            response_text = response.choices[0].message.content
-            answer = extract_answer(response_text)
-            cot = extract_cot(response_text)
-
-            results.append({
-                "question_id": row["question_id"],
-                "question_text": row["question_text"],
-                "options": row["options"],
-                "correct_answer": row["correct_answer"],
-                "model_answer": answer,
-                "is_correct": answer == row["correct_answer"],
-                "model_cot": cot,
-                "raw_response": response_text,
-                "domain": domain,
-                "model": model,
-            })
-
-        completed = len(results) + len(completed_ids)
-        total = len(df)
-        pct = completed / total * 100
-        correct_so_far = sum(1 for r in results if r["is_correct"])
-        acc = correct_so_far / len(results) * 100 if results else 0
-        print(f"  Batch {batch_start // batch_size + 1}: "
-              f"{completed}/{total} ({pct:.1f}%) | "
-              f"Accuracy: {acc:.1f}% | Errors: {errors}")
-        save_results(results, output_path, existing_df)
-
-    total_completed = len(results) + len(completed_ids)
     correct = sum(1 for r in results if r["is_correct"])
-    acc = correct / len(results) * 100 if results else 0
-    print(f"\nDone! {total_completed} questions completed. Errors: {errors}")
-    print(f"Accuracy (this run): {correct}/{len(results)} ({acc:.1f}%)")
-    print(f"Saved to {output_path}")
+    if results:
+        print(f"Accuracy (this run): {correct}/{len(results)} "
+              f"({correct / len(results) * 100:.1f}%)")
 
 
 # ===================================================================
@@ -219,18 +285,19 @@ def run_baseline(domain: str, model: str, limit: int | None, batch_size: int):
 
 def pick_wrong_answer(correct: str) -> str:
     """Pick the first wrong letter alphabetically (deterministic)."""
-    for letter in LETTERS:
+    for letter in config.LETTERS:
         if letter != correct:
             return letter
     raise ValueError(f"No wrong answer found for correct={correct}")
 
 
-def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int):
-    df = load_jsonl(baseline_path)
+def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int, backend: str):
+    df = config.load_jsonl(baseline_path)
     correct_df = df[df["is_correct"] == True].copy()
 
     print(f"Domain:            {domain}")
     print(f"Model:             {model}")
+    print(f"Backend:           {backend}")
     print(f"Batch size:        {batch_size}")
     print(f"Baseline total:    {len(df)}")
     print(f"Answered correctly: {len(correct_df)}")
@@ -239,16 +306,10 @@ def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int):
         print("No correct answers found — nothing to generate.")
         return
 
-    model_safe = safe_model_name(model)
-    output_path = os.path.join(DATA_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
+    model_safe = config.safe_model_name(model)
+    output_path = os.path.join(config.DATA_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
 
-    existing_df = None
-    completed_ids = set()
-    if os.path.exists(output_path):
-        existing_df = load_jsonl(output_path)
-        existing_df = existing_df.drop_duplicates(subset=["question_id"], keep="first")
-        completed_ids = set(existing_df["question_id"])
-        print(f"Resuming: {len(completed_ids)} already completed")
+    existing_df, completed_ids = _load_existing(output_path, ["question_id"])
 
     pending = []
     for _, row in correct_df.iterrows():
@@ -256,12 +317,11 @@ def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int):
             continue
 
         options = row["options"]
-        correct_letter = row["correct_answer"]
-        wrong_letter = pick_wrong_answer(correct_letter)
-        wrong_text = options[letter_to_index(wrong_letter)]
+        wrong_letter = pick_wrong_answer(row["correct_answer"])
+        wrong_text = options[config.letter_to_index(wrong_letter)]
 
-        prompt = WRONG_COT_PROMPT.format(
-            domain=DOMAIN_LABELS[domain],
+        prompt = config.WRONG_COT_PROMPT.format(
+            domain=config.DOMAIN_LABELS[domain],
             wrong_letter=wrong_letter,
             wrong_text=wrong_text,
             question=row["question_text"],
@@ -270,65 +330,46 @@ def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int):
             option_c=options[2],
             option_d=options[3],
         )
-        pending.append((row, wrong_letter, wrong_text, prompt))
+        pending.append(((row, wrong_letter, wrong_text), prompt))
 
-    print(f"Pending:           {len(pending)}")
+    print(f"Pending:    {len(pending)}")
     if not pending:
         print("Nothing to do.")
         return
 
-    results = []
-    errors = 0
+    def _result(ctx, text):
+        row, wrong_letter, wrong_text = ctx
+        return {
+            "question_id": row["question_id"],
+            "question_text": row["question_text"],
+            "options": row["options"],
+            "correct_answer": row["correct_answer"],
+            "wrong_answer": wrong_letter,
+            "wrong_answer_text": wrong_text,
+            "wrong_cot": text.strip(),
+            "domain": domain,
+            "model": model,
+        }
 
-    for batch_start in range(0, len(pending), batch_size):
-        chunk = pending[batch_start:batch_start + batch_size]
-        messages_batch = [[{"role": "user", "content": p}] for _, _, _, p in chunk]
+    def _error(ctx, err):
+        row, wrong_letter, wrong_text = ctx
+        return {
+            "question_id": row["question_id"],
+            "question_text": row["question_text"],
+            "options": row["options"],
+            "correct_answer": row["correct_answer"],
+            "wrong_answer": wrong_letter,
+            "wrong_answer_text": wrong_text,
+            "wrong_cot": f"ERROR: {err}",
+            "domain": domain,
+            "model": model,
+        }
 
-        responses = batch_completion(
-            model=model, messages=messages_batch,
-            max_tokens=1024, temperature=0.0,
-        )
-
-        for (row, wrong_letter, wrong_text, _), response in zip(chunk, responses):
-            if isinstance(response, Exception):
-                errors += 1
-                print(f"  Error on Q{row['question_id']}: {response}")
-                results.append({
-                    "question_id": row["question_id"],
-                    "question_text": row["question_text"],
-                    "options": row["options"],
-                    "correct_answer": row["correct_answer"],
-                    "wrong_answer": wrong_letter,
-                    "wrong_answer_text": wrong_text,
-                    "wrong_cot": f"ERROR: {response}",
-                    "domain": domain,
-                    "model": model,
-                })
-                continue
-
-            response_text = response.choices[0].message.content
-            results.append({
-                "question_id": row["question_id"],
-                "question_text": row["question_text"],
-                "options": row["options"],
-                "correct_answer": row["correct_answer"],
-                "wrong_answer": wrong_letter,
-                "wrong_answer_text": wrong_text,
-                "wrong_cot": response_text.strip(),
-                "domain": domain,
-                "model": model,
-            })
-
-        completed = len(results) + len(completed_ids)
-        total = len(correct_df)
-        pct = completed / total * 100
-        print(f"  Batch {batch_start // batch_size + 1}: "
-              f"{completed}/{total} ({pct:.1f}%) | Errors: {errors}")
-        save_results(results, output_path, existing_df)
-
-    total_completed = len(results) + len(completed_ids)
-    print(f"\nDone! {total_completed} wrong COTs generated. Errors: {errors}")
-    print(f"Saved to {output_path}")
+    results = _run_inference(
+        pending, output_path, existing_df, backend, model,
+        batch_size, max_tokens=1024, total_count=len(correct_df),
+        build_result=_result, build_error=_error,
+    )
 
     if results:
         ex = results[0]
@@ -344,7 +385,7 @@ def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int):
 
 def load_prompt_template(prompt_name: str) -> str:
     """Look up an Experiment 1 prompt template by name."""
-    return EXPERIMENT1_PROMPTS[prompt_name]
+    return config.EXPERIMENT1_PROMPTS[prompt_name]
 
 
 def format_prompt_standard(template: str, question: str, options: list[str]) -> str:
@@ -359,8 +400,8 @@ def format_prompt_standard(template: str, question: str, options: list[str]) -> 
 
 def format_prompt_sycophancy(row: pd.Series, options: list[str]) -> str:
     domain = row["domain"]
-    return SYCOPHANCY_PROMPT.format(
-        domain_expert=DOMAIN_EXPERTS[domain],
+    return config.SYCOPHANCY_PROMPT.format(
+        domain_expert=config.DOMAIN_EXPERTS[domain],
         question=row["question_text"],
         option_a=options[0],
         option_b=options[1],
@@ -379,8 +420,9 @@ def run_sycophancy(
     limit: int | None,
     question_ids: list[int] | None,
     batch_size: int,
+    backend: str,
 ):
-    df = load_jsonl(input_path)
+    df = config.load_jsonl(input_path)
     is_sycophancy = "authority_description" in df.columns
 
     template = None
@@ -400,6 +442,7 @@ def run_sycophancy(
         df = df[df["question_id"].isin(unique_ids)]
 
     print(f"Model:      {model}")
+    print(f"Backend:    {backend}")
     print(f"Prompt:     {prompt_name}")
     print(f"Input:      {os.path.basename(input_path)}")
     print(f"Sycophancy: {is_sycophancy}")
@@ -407,30 +450,22 @@ def run_sycophancy(
     print(f"Variants:   {len(df)}")
     print(f"Questions:  {df['question_id'].nunique()}")
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    model_safe = safe_model_name(model)
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    model_safe = config.safe_model_name(model)
 
     if is_sycophancy and "domain" in df.columns:
         domain = df["domain"].iloc[0]
         output_path = os.path.join(
-            RESULTS_DIR, f"sycophancy_{model_safe}_{domain}.jsonl"
+            config.RESULTS_DIR, f"sycophancy_{model_safe}_{domain}.jsonl"
         )
     else:
         output_path = os.path.join(
-            RESULTS_DIR, f"{model_safe}_{prompt_name}.jsonl"
+            config.RESULTS_DIR, f"{model_safe}_{prompt_name}.jsonl"
         )
 
-    existing_df = None
-    completed_keys = set()
-    if os.path.exists(output_path):
-        existing_df = load_jsonl(output_path)
-        existing_df = existing_df.drop_duplicates(
-            subset=["question_id", "variant"], keep="first"
-        )
-        completed_keys = set(
-            zip(existing_df["question_id"], existing_df["variant"])
-        )
-        print(f"Resuming: {len(completed_keys)} variants already completed")
+    existing_df, completed_keys = _load_existing(
+        output_path, ["question_id", "variant"]
+    )
 
     pending = []
     for _, row in df.iterrows():
@@ -451,78 +486,45 @@ def run_sycophancy(
 
         pending.append((row, prompt))
 
-    print(f"Pending:    {len(pending)}")
+    print(f"Pending:           {len(pending)}")
     if not pending:
         print("Nothing to do.")
         return
 
-    results = []
-    errors = 0
+    def _base_result(row, answer, raw):
+        result = {
+            "question_id": row["question_id"],
+            "variant": row["variant"],
+            "race": row["race"],
+            "gender": row["gender"],
+            "correct_answer": row["correct_answer"],
+            "model_answer": answer,
+            "is_correct": answer == row["correct_answer"],
+            "raw_response": raw,
+            "prompt_name": prompt_name,
+            "model": model,
+        }
+        if is_sycophancy:
+            result["suggested_answer"] = row["suggested_answer"]
+            result["deferred"] = answer == row["suggested_answer"]
+            result["domain"] = row["domain"]
+        return result
 
-    for batch_start in range(0, len(pending), batch_size):
-        chunk = pending[batch_start:batch_start + batch_size]
-        messages_batch = [[{"role": "user", "content": p}] for _, p in chunk]
+    def _result(row, text):
+        return _base_result(row, config.extract_answer(text), text)
 
-        responses = batch_completion(
-            model=model, messages=messages_batch,
-            max_tokens=512, temperature=0.0,
-        )
+    def _error(row, err):
+        result = _base_result(row, "ERROR", err)
+        result["is_correct"] = False
+        if is_sycophancy:
+            result["deferred"] = False
+        return result
 
-        for (row, _), response in zip(chunk, responses):
-            if isinstance(response, Exception):
-                errors += 1
-                print(f"  Error on Q{row['question_id']} {row['variant']}: {response}")
-                result = {
-                    "question_id": row["question_id"],
-                    "variant": row["variant"],
-                    "race": row["race"],
-                    "gender": row["gender"],
-                    "correct_answer": row["correct_answer"],
-                    "model_answer": "ERROR",
-                    "is_correct": False,
-                    "raw_response": str(response),
-                    "prompt_name": prompt_name,
-                    "model": model,
-                }
-                if is_sycophancy:
-                    result["suggested_answer"] = row["suggested_answer"]
-                    result["deferred"] = False
-                    result["domain"] = row["domain"]
-                results.append(result)
-                continue
-
-            response_text = response.choices[0].message.content
-            answer = extract_answer(response_text)
-
-            result = {
-                "question_id": row["question_id"],
-                "variant": row["variant"],
-                "race": row["race"],
-                "gender": row["gender"],
-                "correct_answer": row["correct_answer"],
-                "model_answer": answer,
-                "is_correct": answer == row["correct_answer"],
-                "raw_response": response_text,
-                "prompt_name": prompt_name,
-                "model": model,
-            }
-            if is_sycophancy:
-                result["suggested_answer"] = row["suggested_answer"]
-                result["deferred"] = answer == row["suggested_answer"]
-                result["domain"] = row["domain"]
-
-            results.append(result)
-
-        completed = len(results) + len(completed_keys)
-        total = len(df)
-        pct = completed / total * 100
-        print(f"  Batch {batch_start // batch_size + 1}: "
-              f"{completed}/{total} ({pct:.1f}%) | Errors: {errors}")
-        save_results(results, output_path, existing_df)
-
-    total_completed = len(results) + len(completed_keys)
-    print(f"\nDone! {total_completed} variants completed. Errors: {errors}")
-    print(f"Saved to {output_path}")
+    results = _run_inference(
+        pending, output_path, existing_df, backend, model,
+        batch_size, max_tokens=512, total_count=len(df),
+        build_result=_result, build_error=_error,
+    )
 
     if is_sycophancy and results:
         deferred_count = sum(1 for r in results if r.get("deferred"))
@@ -534,45 +536,52 @@ def run_sycophancy(
 # CLI
 # ===================================================================
 
+def _add_common_args(subparser):
+    """Add --model, --batch-size, --backend to a subcommand."""
+    subparser.add_argument("--model", default=config.DEFAULT_MODEL)
+    subparser.add_argument("--batch-size", type=int, default=config.DEFAULT_BATCH_SIZE)
+    subparser.add_argument(
+        "--backend", required=True, choices=["litellm", "vllm"],
+        help="litellm for cloud APIs, vllm for local GPU inference",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="LLM inference pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # -- baseline --
     p_base = subparsers.add_parser("baseline", help="Run baseline COT inference")
     p_base.add_argument("--domain", required=True, choices=["legal", "medical"])
-    p_base.add_argument("--model", default=DEFAULT_MODEL)
     p_base.add_argument("--limit", type=int, default=None)
-    p_base.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    _add_common_args(p_base)
 
-    # -- wrong-cot --
     p_wc = subparsers.add_parser("wrong-cot", help="Generate wrong COTs")
     p_wc.add_argument("--domain", required=True, choices=["legal", "medical"])
     p_wc.add_argument("--baseline", required=True, help="Path to baseline results JSONL")
-    p_wc.add_argument("--model", default=DEFAULT_MODEL)
-    p_wc.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    _add_common_args(p_wc)
 
-    # -- sycophancy --
     p_syc = subparsers.add_parser("sycophancy", help="Run sycophancy/experiment1 inference")
     p_syc.add_argument("--input", required=True, help="Input JSONL of question variants")
-    p_syc.add_argument("--model", default=DEFAULT_MODEL)
     p_syc.add_argument("--prompt", default="sycophancy",
                         choices=["baseline", "with_explanation", "debiasing", "sycophancy"])
     p_syc.add_argument("--limit", type=int, default=None)
     p_syc.add_argument("--question-ids", type=str, default=None)
-    p_syc.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    _add_common_args(p_syc)
 
     args = parser.parse_args()
+    _init_backend(args.backend, args.model)
 
     if args.command == "baseline":
         run_baseline(
             domain=args.domain, model=args.model,
             limit=args.limit, batch_size=args.batch_size,
+            backend=args.backend,
         )
     elif args.command == "wrong-cot":
         run_wrong_cot(
             baseline_path=args.baseline, domain=args.domain,
             model=args.model, batch_size=args.batch_size,
+            backend=args.backend,
         )
     elif args.command == "sycophancy":
         question_ids = None
@@ -582,6 +591,7 @@ def main():
             input_path=args.input, model=args.model,
             prompt_name=args.prompt, limit=args.limit,
             question_ids=question_ids, batch_size=args.batch_size,
+            backend=args.backend,
         )
 
 

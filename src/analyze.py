@@ -20,7 +20,7 @@ import pandas as pd
 from scipy.stats import chi2_contingency
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import GENDERS, RACES, RACES_EXTENDED, RESULTS_DIR, cramers_v, load_jsonl
+import config
 
 # Ordered categories for the sycophancy ladder
 LAYER_ORDER = [
@@ -40,7 +40,7 @@ LAYER_ORDER = [
 def _load_results(filepath: str) -> pd.DataFrame:
     """Load results from JSONL or CSV based on file extension."""
     if filepath.endswith(".jsonl"):
-        return load_jsonl(filepath)
+        return config.load_jsonl(filepath)
     elif filepath.endswith(".csv"):
         return pd.read_csv(filepath)
     else:
@@ -49,11 +49,51 @@ def _load_results(filepath: str) -> pd.DataFrame:
 
 def _discover_files(pattern_prefix: str) -> list[str]:
     """Find result files matching a prefix (both JSONL and CSV)."""
-    jsonl_files = glob.glob(os.path.join(RESULTS_DIR, f"{pattern_prefix}*.jsonl"))
-    csv_files = glob.glob(os.path.join(RESULTS_DIR, f"{pattern_prefix}*.csv"))
+    jsonl_files = glob.glob(os.path.join(config.RESULTS_DIR, f"{pattern_prefix}*.jsonl"))
+    csv_files = glob.glob(os.path.join(config.RESULTS_DIR, f"{pattern_prefix}*.csv"))
     all_files = jsonl_files + csv_files
     all_files = [f for f in all_files if "analysis_" not in os.path.basename(f)]
     return sorted(all_files)
+
+
+def _print_deference_breakdown(
+    title: str,
+    subset_df: pd.DataFrame,
+    baseline_rate: float,
+    races: list[str] | None = None,
+    genders: list[str] | None = None,
+    label_suffix: str = "",
+):
+    """Print a deference-rate table broken down by race and/or gender."""
+    if len(subset_df) == 0:
+        return
+    print(f"\n--- {title} ---")
+    print(f"  Baseline: {baseline_rate:.4f}")
+    print(f"\n  {'Group':<25} {'Deference':>12} {'Delta':>12} {'N':>6}")
+    print(f"  {'-'*57}")
+
+    def _row(label, sub):
+        if len(sub) == 0:
+            return
+        rate = sub["deferred"].mean()
+        print(f"  {label:<25} {rate:>12.4f} {rate - baseline_rate:>+12.4f} {len(sub):>6}")
+
+    if races:
+        for race in races:
+            _row(f"{race}{label_suffix}", subset_df[subset_df["race"] == race])
+        if genders:
+            print()
+
+    if genders:
+        for gender in genders:
+            _row(f"{gender}{label_suffix}", subset_df[subset_df["gender"] == gender])
+
+    if races and genders:
+        print()
+        for race in races:
+            for gender in genders:
+                sub = subset_df[(subset_df["race"] == race) & (subset_df["gender"] == gender)]
+                _row(f"{race} {gender}", sub)
 
 
 # ===================================================================
@@ -90,7 +130,7 @@ def analyze_experiment1(filepath: str):
     print(f"  {'Race':<12} {'Accuracy':>10} {'Delta vs Neutral':>18}")
     print(f"  {'-'*42}")
     print(f"  {'Neutral':<12} {neutral_acc:>10.4f} {'---':>18}")
-    for race in RACES_EXTENDED:
+    for race in config.RACES_EXTENDED:
         race_df = df[df["race"] == race]
         if len(race_df) == 0:
             continue
@@ -103,7 +143,7 @@ def analyze_experiment1(filepath: str):
     print(f"  {'Gender':<12} {'Accuracy':>10} {'Delta vs Neutral':>18}")
     print(f"  {'-'*42}")
     print(f"  {'Neutral':<12} {neutral_acc:>10.4f} {'---':>18}")
-    for gender in GENDERS:
+    for gender in config.GENDERS:
         gender_df = df[df["gender"] == gender]
         if len(gender_df) == 0:
             continue
@@ -115,8 +155,8 @@ def analyze_experiment1(filepath: str):
     print(f"\n--- Accuracy by Race x Gender ---")
     print(f"  {'Group':<20} {'Accuracy':>10} {'Delta vs Neutral':>18}")
     print(f"  {'-'*50}")
-    for race in RACES_EXTENDED:
-        for gender in GENDERS:
+    for race in config.RACES_EXTENDED:
+        for gender in config.GENDERS:
             group_df = df[(df["race"] == race) & (df["gender"] == gender)]
             if len(group_df) == 0:
                 continue
@@ -166,7 +206,7 @@ def analyze_experiment1(filepath: str):
             continue
         ct = pd.crosstab(qdf["variant"], qdf["is_correct"])
         if ct.shape[0] > 1 and ct.shape[1] > 1:
-            v = cramers_v(ct.values)
+            v = config.cramers_v(ct.values)
             v_values.append({"question_id": qid, "cramers_v": v})
 
     if v_values:
@@ -179,7 +219,7 @@ def analyze_experiment1(filepath: str):
 
     # --- Save detailed analysis ---
     basename = os.path.splitext(os.path.basename(filepath))[0]
-    analysis_path = os.path.join(RESULTS_DIR, f"analysis_{basename}.csv")
+    analysis_path = os.path.join(config.RESULTS_DIR, f"analysis_{basename}.csv")
     if len(flip_df) > 0:
         flip_df.to_csv(analysis_path, index=False)
         print(f"\n  Detailed analysis saved to {analysis_path}")
@@ -262,119 +302,37 @@ def analyze_sycophancy(filepath: str):
     ]
     auth_neutral_rate = df[df["variant"] == "sycophancy_authority"]["deferred"].mean()
 
-    if len(auth_demo_df) > 0:
-        print(f"\n--- Demographic Authority: Deference by Race x Gender ---")
-        print(f"  Neutral authority baseline: {auth_neutral_rate:.4f}")
-        print(f"\n  {'Group':<25} {'Deference':>12} {'Delta':>12} {'N':>6}")
-        print(f"  {'-'*57}")
+    _print_deference_breakdown(
+        "Demographic Authority: Deference by Race x Gender",
+        auth_demo_df, auth_neutral_rate,
+        races=config.RACES, genders=config.GENDERS,
+    )
 
-        for race in RACES:
-            race_df = auth_demo_df[auth_demo_df["race"] == race]
-            if len(race_df) == 0:
-                continue
-            rate = race_df["deferred"].mean()
-            delta = rate - auth_neutral_rate
-            print(f"  {race:<25} {rate:>12.4f} {delta:>+12.4f} {len(race_df):>6}")
-
-        print()
-        for gender in GENDERS:
-            gender_df = auth_demo_df[auth_demo_df["gender"] == gender]
-            if len(gender_df) == 0:
-                continue
-            rate = gender_df["deferred"].mean()
-            delta = rate - auth_neutral_rate
-            print(f"  {gender:<25} {rate:>12.4f} {delta:>+12.4f} {len(gender_df):>6}")
-
-        print()
-        for race in RACES:
-            for gender in GENDERS:
-                group_df = auth_demo_df[
-                    (auth_demo_df["race"] == race) & (auth_demo_df["gender"] == gender)
-                ]
-                if len(group_df) == 0:
-                    continue
-                rate = group_df["deferred"].mean()
-                delta = rate - auth_neutral_rate
-                label = f"{race} {gender}"
-                print(f"  {label:<25} {rate:>12.4f} {delta:>+12.4f} {len(group_df):>6}")
-
-    # -----------------------------------------------------------------------
     # 3g. Gender-Only Authority
-    # -----------------------------------------------------------------------
     gender_only_df = df[df["variant"].str.startswith("sycophancy_authority_gender_")]
-    if len(gender_only_df) > 0:
-        print(f"\n--- Gender-Only Authority: Deference by Gender ---")
-        print(f"  Neutral authority baseline: {auth_neutral_rate:.4f}")
-        print(f"\n  {'Group':<25} {'Deference':>12} {'Delta':>12} {'N':>6}")
-        print(f"  {'-'*57}")
+    _print_deference_breakdown(
+        "Gender-Only Authority: Deference by Gender",
+        gender_only_df, auth_neutral_rate,
+        genders=config.GENDERS, label_suffix=" (gender only)",
+    )
 
-        for gender in GENDERS:
-            g_df = gender_only_df[gender_only_df["gender"] == gender]
-            if len(g_df) == 0:
-                continue
-            rate = g_df["deferred"].mean()
-            delta = rate - auth_neutral_rate
-            label = f"{gender} (gender only)"
-            print(f"  {label:<25} {rate:>12.4f} {delta:>+12.4f} {len(g_df):>6}")
-
-    # -----------------------------------------------------------------------
     # 3r. Race-Only Authority
-    # -----------------------------------------------------------------------
     race_only_df = df[df["variant"].str.startswith("sycophancy_authority_race_")]
-    if len(race_only_df) > 0:
-        print(f"\n--- Race-Only Authority: Deference by Race ---")
-        print(f"  Neutral authority baseline: {auth_neutral_rate:.4f}")
-        print(f"\n  {'Group':<25} {'Deference':>12} {'Delta':>12} {'N':>6}")
-        print(f"  {'-'*57}")
-
-        for race in RACES:
-            r_df = race_only_df[race_only_df["race"] == race]
-            if len(r_df) == 0:
-                continue
-            rate = r_df["deferred"].mean()
-            delta = rate - auth_neutral_rate
-            label = f"{race} (race only)"
-            print(f"  {label:<25} {rate:>12.4f} {delta:>+12.4f} {len(r_df):>6}")
+    _print_deference_breakdown(
+        "Race-Only Authority: Deference by Race",
+        race_only_df, auth_neutral_rate,
+        races=config.RACES, label_suffix=" (race only)",
+    )
 
     # -----------------------------------------------------------------------
     # 4. Person Demographic: deference by subject demographics
     # -----------------------------------------------------------------------
     person_demo_df = df[df["variant"].str.startswith("sycophancy_person_")]
-    if len(person_demo_df) > 0:
-        print(f"\n--- Person Demographic: Deference by Subject Demographics ---")
-        print(f"  Neutral authority baseline (no person demo): {auth_neutral_rate:.4f}")
-        print(f"\n  {'Group':<25} {'Deference':>12} {'Delta':>12} {'N':>6}")
-        print(f"  {'-'*57}")
-
-        for race in RACES:
-            race_df = person_demo_df[person_demo_df["race"] == race]
-            if len(race_df) == 0:
-                continue
-            rate = race_df["deferred"].mean()
-            delta = rate - auth_neutral_rate
-            print(f"  {race:<25} {rate:>12.4f} {delta:>+12.4f} {len(race_df):>6}")
-
-        print()
-        for gender in GENDERS:
-            gender_df = person_demo_df[person_demo_df["gender"] == gender]
-            if len(gender_df) == 0:
-                continue
-            rate = gender_df["deferred"].mean()
-            delta = rate - auth_neutral_rate
-            print(f"  {gender:<25} {rate:>12.4f} {delta:>+12.4f} {len(gender_df):>6}")
-
-        print()
-        for race in RACES:
-            for gender in GENDERS:
-                group_df = person_demo_df[
-                    (person_demo_df["race"] == race) & (person_demo_df["gender"] == gender)
-                ]
-                if len(group_df) == 0:
-                    continue
-                rate = group_df["deferred"].mean()
-                delta = rate - auth_neutral_rate
-                label = f"{race} {gender}"
-                print(f"  {label:<25} {rate:>12.4f} {delta:>+12.4f} {len(group_df):>6}")
+    _print_deference_breakdown(
+        "Person Demographic: Deference by Subject Demographics",
+        person_demo_df, auth_neutral_rate,
+        races=config.RACES, genders=config.GENDERS,
+    )
 
     # -----------------------------------------------------------------------
     # 5. Per-question deference breakdown
@@ -432,7 +390,7 @@ def analyze_sycophancy(filepath: str):
             return
         ct = pd.crosstab(subset_df["variant"], subset_df["deferred"])
         if ct.shape[0] > 1 and ct.shape[1] > 1:
-            v = cramers_v(ct.values)
+            v = config.cramers_v(ct.values)
             chi2, p_val, _, _ = chi2_contingency(ct.values)
             print(f"\n--- Cramer's V ({label}) ---")
             print(f"  V = {v:.4f}, chi2 = {chi2:.4f}, p = {p_val:.4f}")
@@ -450,7 +408,7 @@ def analyze_sycophancy(filepath: str):
     # Save detailed per-question breakdown
     # -----------------------------------------------------------------------
     basename = os.path.splitext(os.path.basename(filepath))[0]
-    analysis_path = os.path.join(RESULTS_DIR, f"analysis_{basename}.csv")
+    analysis_path = os.path.join(config.RESULTS_DIR, f"analysis_{basename}.csv")
     q_df.to_csv(analysis_path, index=False)
     print(f"\n  Per-question breakdown saved to {analysis_path}")
 

@@ -40,142 +40,101 @@ from config import (
 # FILTER subcommand — select person-centric questions
 # ===================================================================
 
-LEGAL_PERSON_KEYWORDS = [
-    "a man", "a woman", "a boy", "a girl", "a person",
-    "the man", "the woman", "the boy", "the girl",
-    "defendant", "plaintiff", "suspect", "accused",
-    "petitioner", "respondent", "appellant",
-    "employee", "employer", "worker",
-    "landlord", "tenant", "lessee", "lessor",
-    "buyer", "seller", "vendor", "purchaser",
-    "driver", "motorist", "pedestrian",
-    "patient", "client", "customer",
-    "homeowner", "resident", "neighbor",
-    "student", "teacher", "professor",
-    "year-old", "years old",
-]
+FILTER_CONFIG = {
+    "legal": {
+        "input": "mmlu_professional_law.csv",
+        "output": "filtered_questions.jsonl",
+        "text_col": "centerpiece",
+        "correct_fn": lambda row: ast.literal_eval(row["correct_options"])[0],
+        "keywords": [
+            "a man", "a woman", "a boy", "a girl", "a person",
+            "the man", "the woman", "the boy", "the girl",
+            "defendant", "plaintiff", "suspect", "accused",
+            "petitioner", "respondent", "appellant",
+            "employee", "employer", "worker",
+            "landlord", "tenant", "lessee", "lessor",
+            "buyer", "seller", "vendor", "purchaser",
+            "driver", "motorist", "pedestrian",
+            "patient", "client", "customer",
+            "homeowner", "resident", "neighbor",
+            "student", "teacher", "professor",
+            "year-old", "years old",
+        ],
+        "exclude": [
+            r"^which of the following",
+            r"^under the",
+            r"^the \w+ amendment",
+            r"^according to",
+        ],
+    },
+    "medical": {
+        "input": "medqa.csv",
+        "output": "filtered_medqa.jsonl",
+        "text_col": "question",
+        "correct_fn": lambda row: row["answer_idx"],
+        "keywords": [
+            "year-old", "years old", "month-old", "months old",
+            "day-old", "week-old",
+            "a man", "a woman", "a boy", "a girl",
+            "the man", "the woman", "the boy", "the girl",
+            "a male", "a female",
+            "patient", "infant", "newborn", "neonate",
+            "child", "adolescent", "teenager",
+            "presents to", "brought to", "comes to",
+            "is admitted", "is referred",
+        ],
+        "exclude": [
+            r"^which of the following",
+            r"^what is the",
+            r"^what are the",
+            r"^which enzyme",
+            r"^which vitamin",
+            r"^which receptor",
+            r"^which drug",
+            r"^which hormone",
+            r"^which structure",
+            r"^which type",
+            r"^the__(most|least|best|primary)",
+        ],
+    },
+}
 
-LEGAL_EXCLUDE_PATTERNS = [
-    r"^which of the following",
-    r"^under the",
-    r"^the \w+ amendment",
-    r"^according to",
-]
 
-MEDICAL_PERSON_KEYWORDS = [
-    "year-old", "years old", "month-old", "months old",
-    "day-old", "week-old",
-    "a man", "a woman", "a boy", "a girl",
-    "the man", "the woman", "the boy", "the girl",
-    "a male", "a female",
-    "patient", "infant", "newborn", "neonate",
-    "child", "adolescent", "teenager",
-    "presents to", "brought to", "comes to",
-    "is admitted", "is referred",
-]
-
-MEDICAL_EXCLUDE_PATTERNS = [
-    r"^which of the following",
-    r"^what is the",
-    r"^what are the",
-    r"^which enzyme",
-    r"^which vitamin",
-    r"^which receptor",
-    r"^which drug",
-    r"^which hormone",
-    r"^which structure",
-    r"^which type",
-    r"^the__(most|least|best|primary)",
-]
-
-
-def has_person_reference(text: str, keywords: list[str]) -> bool:
-    """Check if the question text contains references to specific people."""
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in keywords)
-
-
-def is_excluded(text: str, patterns: list[str]) -> bool:
-    """Check if question matches an exclusion pattern (doctrine/factual only)."""
-    text_lower = text.lower().strip()
-    return any(re.match(pat, text_lower) for pat in patterns)
-
-
-def filter_legal():
-    """Filter MMLU Professional Law questions."""
-    input_path = os.path.join(DATA_DIR, "mmlu_professional_law.csv")
-    output_path = os.path.join(DATA_DIR, "filtered_questions.jsonl")
+def _filter_domain(domain: str):
+    cfg = FILTER_CONFIG[domain]
+    input_path = os.path.join(DATA_DIR, cfg["input"])
+    output_path = os.path.join(DATA_DIR, cfg["output"])
 
     df = pd.read_csv(input_path)
-    print(f"Total MMLU Professional Law questions: {len(df)}")
+    print(f"Total {domain} questions: {len(df)}")
+
+    text_lower_cache = df[cfg["text_col"]].str.lower()
+    has_person = text_lower_cache.apply(
+        lambda t: any(kw in t for kw in cfg["keywords"])
+    )
+    excluded = text_lower_cache.str.strip().apply(
+        lambda t: any(re.match(pat, t) for pat in cfg["exclude"])
+    )
+    keep = has_person & ~excluded
 
     rows = []
-    for idx, row in df.iterrows():
-        options = parse_options(row["options"])
-        correct = ast.literal_eval(row["correct_options"])[0]
-        text = row["centerpiece"]
-
-        if not has_person_reference(text, LEGAL_PERSON_KEYWORDS):
-            continue
-        if is_excluded(text, LEGAL_EXCLUDE_PATTERNS):
-            continue
-
+    for idx, row in df[keep].iterrows():
         rows.append({
             "question_id": idx,
-            "question_text": text,
-            "options": options,
-            "correct_answer": correct,
+            "question_text": row[cfg["text_col"]],
+            "options": parse_options(row["options"]),
+            "correct_answer": cfg["correct_fn"](row),
         })
 
     out_df = pd.DataFrame(rows)
     save_jsonl(out_df, output_path)
 
-    print(f"Questions with person references: {len(out_df)}")
+    print(f"Filtered: {len(out_df)} questions")
     print(f"Saved to {output_path}")
 
-    print("\n--- Sample filtered questions ---")
-    for i in range(min(5, len(out_df))):
-        row = out_df.iloc[i]
-        print(f"\nQ{row['question_id']} (answer: {row['correct_answer']}):")
-        print(f"  {row['question_text'][:200]}...")
-
-
-def filter_medical():
-    """Filter MedQA questions."""
-    input_path = os.path.join(DATA_DIR, "medqa.csv")
-    output_path = os.path.join(DATA_DIR, "filtered_medqa.jsonl")
-
-    df = pd.read_csv(input_path)
-    print(f"Total MedQA questions: {len(df)}")
-
-    rows = []
-    for idx, row in df.iterrows():
-        options = parse_options(row["options"])
-        text = row["question"]
-
-        if not has_person_reference(text, MEDICAL_PERSON_KEYWORDS):
-            continue
-        if is_excluded(text, MEDICAL_EXCLUDE_PATTERNS):
-            continue
-
-        rows.append({
-            "question_id": idx,
-            "question_text": text,
-            "options": options,
-            "correct_answer": row["answer_idx"],
-        })
-
-    out_df = pd.DataFrame(rows)
-    save_jsonl(out_df, output_path)
-
-    print(f"Questions with patient references: {len(out_df)}")
-    print(f"Saved to {output_path}")
-
-    print("\n--- Sample filtered questions ---")
-    for i in range(min(5, len(out_df))):
-        row = out_df.iloc[i]
-        print(f"\nQ{row['question_id']} (answer: {row['correct_answer']}):")
-        print(f"  {row['question_text'][:200]}...")
+    for i in range(min(3, len(out_df))):
+        r = out_df.iloc[i]
+        print(f"\n  Q{r['question_id']} ({r['correct_answer']}): {r['question_text'][:150]}...")
 
 
 # ===================================================================
@@ -324,103 +283,57 @@ def run_sycophancy(domain: str, model_safe: str):
     rows = []
 
     for _, wc_row in wc_df.iterrows():
-        qid = wc_row["question_id"]
         question_text = wc_row["question_text"]
-        options = wc_row["options"]
-        correct = wc_row["correct_answer"]
-        wrong = wc_row["wrong_answer"]
-        wrong_cot = wc_row["wrong_cot"]
 
-        rows.append({
-            "question_id": qid,
-            "variant": "sycophancy_user",
+        base = {
+            "question_id": wc_row["question_id"],
+            "variant": None,
             "race": "none",
             "gender": "none",
             "question_text": question_text,
-            "options": options,
-            "correct_answer": correct,
-            "suggested_answer": wrong,
-            "suggested_cot": wrong_cot,
-            "authority_description": "A user",
+            "options": wc_row["options"],
+            "correct_answer": wc_row["correct_answer"],
+            "suggested_answer": wc_row["wrong_answer"],
+            "suggested_cot": wc_row["wrong_cot"],
+            "authority_description": None,
             "domain": domain,
-        })
+        }
+        v = lambda **kw: {**base, **kw}
 
-        rows.append({
-            "question_id": qid,
-            "variant": "sycophancy_authority",
-            "race": "none",
-            "gender": "none",
-            "question_text": question_text,
-            "options": options,
-            "correct_answer": correct,
-            "suggested_answer": wrong,
-            "suggested_cot": wrong_cot,
-            "authority_description": f"A {authority_role}",
-            "domain": domain,
-        })
+        rows.append(v(variant="sycophancy_user", authority_description="A user"))
+        rows.append(v(variant="sycophancy_authority",
+                      authority_description=f"A {authority_role}"))
 
         for race in RACES:
             for gender in GENDERS:
-                rows.append({
-                    "question_id": qid,
-                    "variant": f"sycophancy_authority_{race}_{gender}",
-                    "race": race,
-                    "gender": gender,
-                    "question_text": question_text,
-                    "options": options,
-                    "correct_answer": correct,
-                    "suggested_answer": wrong,
-                    "suggested_cot": wrong_cot,
-                    "authority_description": f"A {race} {gender} {authority_role}",
-                    "domain": domain,
-                })
+                rows.append(v(
+                    variant=f"sycophancy_authority_{race}_{gender}",
+                    race=race, gender=gender,
+                    authority_description=f"A {race} {gender} {authority_role}",
+                ))
 
         for gender in GENDERS:
-            rows.append({
-                "question_id": qid,
-                "variant": f"sycophancy_authority_gender_{gender}",
-                "race": "none",
-                "gender": gender,
-                "question_text": question_text,
-                "options": options,
-                "correct_answer": correct,
-                "suggested_answer": wrong,
-                "suggested_cot": wrong_cot,
-                "authority_description": f"A {gender} {authority_role}",
-                "domain": domain,
-            })
+            rows.append(v(
+                variant=f"sycophancy_authority_gender_{gender}",
+                gender=gender,
+                authority_description=f"A {gender} {authority_role}",
+            ))
 
         for race in RACES:
-            rows.append({
-                "question_id": qid,
-                "variant": f"sycophancy_authority_race_{race}",
-                "race": race,
-                "gender": "none",
-                "question_text": question_text,
-                "options": options,
-                "correct_answer": correct,
-                "suggested_answer": wrong,
-                "suggested_cot": wrong_cot,
-                "authority_description": f"A {race} {authority_role}",
-                "domain": domain,
-            })
+            rows.append(v(
+                variant=f"sycophancy_authority_race_{race}",
+                race=race,
+                authority_description=f"A {race} {authority_role}",
+            ))
 
         for race in RACES:
             for gender in GENDERS:
-                injected_text = inject_demographic(question_text, race, gender)
-                rows.append({
-                    "question_id": qid,
-                    "variant": f"sycophancy_person_{race}_{gender}",
-                    "race": race,
-                    "gender": gender,
-                    "question_text": injected_text,
-                    "options": options,
-                    "correct_answer": correct,
-                    "suggested_answer": wrong,
-                    "suggested_cot": wrong_cot,
-                    "authority_description": f"A {authority_role}",
-                    "domain": domain,
-                })
+                rows.append(v(
+                    variant=f"sycophancy_person_{race}_{gender}",
+                    race=race, gender=gender,
+                    question_text=inject_demographic(question_text, race, gender),
+                    authority_description=f"A {authority_role}",
+                ))
 
     out_df = pd.DataFrame(rows)
     save_jsonl(out_df, output_path)
@@ -479,10 +392,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "filter":
-        if args.domain == "legal":
-            filter_legal()
-        elif args.domain == "medical":
-            filter_medical()
+        _filter_domain(args.domain)
     elif args.command == "demographics":
         run_demographics(domain=args.domain)
     elif args.command == "sycophancy":
