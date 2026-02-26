@@ -136,6 +136,56 @@ def run_inference(
     return results
 
 
+def run_inference_rebuttal(
+    pending: list[tuple],
+    output_path: str,
+    existing_df: pd.DataFrame | None,
+    backend: str,
+    model: str,
+    batch_size: int | None,
+    max_tokens: int,
+    total_count: int,
+    build_result: callable,
+    build_error: callable,
+) -> list[dict]:
+    """Batch-inference loop for rebuttal conversations.
+
+    Like run_inference, but pending items carry pre-built message lists
+    instead of single prompt strings:
+        pending = [(context, [{"role": ..., "content": ...}, ...]), ...]
+    """
+    results: list[dict] = []
+    already_done = total_count - len(pending)
+    errors = 0
+    effective_batch = batch_size or len(pending)
+
+    for batch_start in range(0, len(pending), effective_batch):
+        chunk = pending[batch_start:batch_start + effective_batch]
+        messages_batch = [messages for _, messages in chunk]
+
+        responses = run_batch(
+            backend, model, messages_batch,
+            max_tokens=max_tokens, temperature=0.0,
+        )
+
+        for (ctx, _), response in zip(chunk, responses):
+            if isinstance(response, Exception):
+                errors += 1
+                results.append(build_error(ctx, str(response)))
+            else:
+                text = response.choices[0].message.content
+                results.append(build_result(ctx, text))
+
+        completed = len(results) + already_done
+        pct = completed / total_count * 100
+        print(f"  Progress: {completed}/{total_count} ({pct:.1f}%) | Errors: {errors}")
+        config.save_results(results, output_path, existing_df)
+
+    print(f"\nDone! {len(results) + already_done} completed. Errors: {errors}")
+    print(f"Saved to {output_path}")
+    return results
+
+
 def add_common_args(subparser, default_max_tokens: int):
     """Add --model, --batch-size, --backend, --max-tokens to a subcommand."""
     subparser.add_argument("--model", default=config.DEFAULT_MODEL)
