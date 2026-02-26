@@ -23,6 +23,12 @@ dependencies = [
 [project.optional-dependencies]
 local = [
     "vllm",
+    "trl",
+    "peft",
+    "bitsandbytes",
+    "transformers",
+    "accelerate",
+    "wandb",
 ]
 
 [build-system]

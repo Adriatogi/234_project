@@ -26,10 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from eval.prompts import SYCOPHANCY_PROMPT
 
-VARIANT_FILES = {
-    "legal": os.path.join(config.DATA_DIR, "sycophancy_variants_legal.jsonl"),
-    "medical": os.path.join(config.DATA_DIR, "sycophancy_variants_medical.jsonl"),
-}
+REQUIRED_FIELDS = ["question_text", "options", "suggested_cot", "authority_description", "domain"]
 
 
 def _load_keyed(path: str) -> dict[tuple, dict]:
@@ -42,28 +39,29 @@ def _load_keyed(path: str) -> dict[tuple, dict]:
     return out
 
 
-def _reconstruct_prompt(variant_row: dict) -> str:
-    """Reconstruct the sycophancy prompt from a variant row."""
-    options = variant_row["options"]
+def _reconstruct_prompt(row: dict) -> str:
+    """Reconstruct the sycophancy prompt from a result row's backfilled fields."""
+    for field in REQUIRED_FIELDS:
+        assert field in row, f"Result row missing '{field}' — run backfill_result_fields.py first"
+    options = row["options"]
     return SYCOPHANCY_PROMPT.format(
-        domain_expert=config.DOMAIN_EXPERTS[variant_row["domain"]],
-        question=variant_row["question_text"],
+        domain_expert=config.DOMAIN_EXPERTS[row["domain"]],
+        question=row["question_text"],
         option_a=options[0],
         option_b=options[1],
         option_c=options[2],
         option_d=options[3],
-        authority_description=variant_row["authority_description"],
-        suggested_answer=variant_row["suggested_answer"],
-        suggested_cot=variant_row["suggested_cot"],
+        authority_description=row["authority_description"],
+        suggested_answer=row["suggested_answer"],
+        suggested_cot=row["suggested_cot"],
     )
 
 
-def build_pairs(chosen_path: str, rejected_path: str, domain: str) -> list[dict]:
+def build_pairs(chosen_path: str, rejected_path: str) -> list[dict]:
     chosen = _load_keyed(chosen_path)
     rejected = _load_keyed(rejected_path)
-    variants = _load_keyed(VARIANT_FILES[domain])
 
-    common_keys = set(chosen.keys()) & set(rejected.keys()) & set(variants.keys())
+    common_keys = set(chosen.keys()) & set(rejected.keys())
 
     pairs = []
     for key in common_keys:
@@ -79,14 +77,14 @@ def build_pairs(chosen_path: str, rejected_path: str, domain: str) -> list[dict]
         if c_row["deferred"]:
             continue
 
-        prompt = _reconstruct_prompt(variants[key])
+        prompt = _reconstruct_prompt(r_row)
         pairs.append({
             "prompt": prompt,
             "chosen": c_row["raw_response"],
             "rejected": r_row["raw_response"],
             "question_id": key[0],
             "variant": key[1],
-            "domain": domain,
+            "domain": r_row["domain"],
         })
 
     return pairs
@@ -103,10 +101,10 @@ def main():
     parser.add_argument("--output-dir", default=config.DATA_DIR, help="Directory for output files")
     args = parser.parse_args()
 
-    legal_pairs = build_pairs(args.chosen_legal, args.rejected_legal, "legal")
+    legal_pairs = build_pairs(args.chosen_legal, args.rejected_legal)
     print(f"legal: {len(legal_pairs)} DPO pairs")
 
-    medical_pairs = build_pairs(args.chosen_medical, args.rejected_medical, "medical")
+    medical_pairs = build_pairs(args.chosen_medical, args.rejected_medical)
     print(f"medical: {len(medical_pairs)} DPO pairs")
 
     all_pairs = legal_pairs + medical_pairs
