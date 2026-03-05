@@ -208,3 +208,7 @@ __marimo__/
 checkpoints/
 wandb/
 data/multiturn_variants_*.jsonl
+
+# Large files (>100MB, exceed GitHub limit)
+data/results/multi_turn/multiturn_sycophancy_*.jsonl
+data/variants/multiturn_variants_*.jsonl
