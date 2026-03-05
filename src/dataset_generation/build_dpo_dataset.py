@@ -6,10 +6,10 @@ become DPO preference pairs: chosen = non-sycophantic response, rejected = sycop
 
 Usage:
     python src/dataset_generation/build_dpo_dataset.py \
-        --chosen-legal data/results/sycophancy_Qwen_Qwen2.5-7B-Instruct_legal.jsonl \
-        --chosen-medical data/results/sycophancy_Qwen_Qwen2.5-7B-Instruct_medical.jsonl \
-        --rejected-legal data/results/sycophancy_meta-llama_Llama-3.1-8B-Instruct_legal.jsonl \
-        --rejected-medical data/results/sycophancy_meta-llama_Llama-3.1-8B-Instruct_medical.jsonl
+        --chosen-legal data/results/single_turn/sycophancy_Qwen_Qwen2.5-7B-Instruct_legal.jsonl \
+        --chosen-medical data/results/single_turn/sycophancy_Qwen_Qwen2.5-7B-Instruct_medical.jsonl \
+        --rejected-legal data/results/single_turn/sycophancy_meta-llama_Llama-3.1-8B-Instruct_legal.jsonl \
+        --rejected-medical data/results/single_turn/sycophancy_meta-llama_Llama-3.1-8B-Instruct_medical.jsonl
 
 Outputs:
     data/dpo_train.jsonl
@@ -24,7 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
-from eval.prompts import SYCOPHANCY_PROMPT
+from single_turn_eval.prompts import SYCOPHANCY_PROMPT
 
 REQUIRED_FIELDS = ["question_text", "options", "suggested_cot", "authority_description", "domain"]
 

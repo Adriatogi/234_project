@@ -1,7 +1,7 @@
 """
 Shared constants and utilities for the sycophancy pipeline.
 
-Prompts live in dataset_generation/prompts.py and eval/prompts.py.
+Prompts live in dataset_generation/prompts.py and single_turn_eval/prompts.py.
 """
 
 import ast
@@ -18,6 +18,12 @@ from scipy.stats import chi2_contingency
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "data", "results")
+BASELINE_RESULTS_DIR = os.path.join(RESULTS_DIR, "baseline")
+SINGLE_TURN_RESULTS_DIR = os.path.join(RESULTS_DIR, "single_turn")
+MULTI_TURN_RESULTS_DIR = os.path.join(RESULTS_DIR, "multi_turn")
+REBUTTAL_RESULTS_DIR = os.path.join(RESULTS_DIR, "rebuttal")
+VARIANTS_DIR = os.path.join(DATA_DIR, "variants")
+WRONG_COTS_DIR = os.path.join(DATA_DIR, "wrong_cots")
 
 # ---------------------------------------------------------------------------
 # Model / inference constants
@@ -94,6 +100,7 @@ def safe_model_name(model: str) -> str:
 # ---------------------------------------------------------------------------
 
 _ANSWER_PATTERNS_RANKED = [
+    re.compile(r"Answer:\s*\[([A-Da-d])\]"),
     re.compile(r"Answer:\s*([A-Da-d])"),
     re.compile(r"(?:the\s+)?(?:correct\s+)?answer\s+is\s+([A-Da-d])\b", re.IGNORECASE),
     re.compile(r"I\s+would\s+choose\s+([A-Da-d])\b", re.IGNORECASE),

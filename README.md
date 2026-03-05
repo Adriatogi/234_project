@@ -235,20 +235,20 @@ python src/dataset_generation/generate_cot.py baseline \
 # 4. Generate wrong COTs for correctly-answered questions
 python src/dataset_generation/generate_cot.py wrong-cot \
     --domain legal --backend $BACKEND --model "$MODEL" \
-    --baseline "data/results/baseline_cot_${MODEL_SAFE}_legal.jsonl"
+    --baseline "data/results/baseline/baseline_cot_${MODEL_SAFE}_legal.jsonl"
 
 # 5. Build 14-variant sycophancy ladder
 python src/dataset_generation/build_sycophancy_variants.py sycophancy \
     --domain legal --model-safe "$MODEL_SAFE"
 
 # 6. Run sycophancy inference
-python src/eval/run_sycophancy_inference.py \
-    --input data/sycophancy_variants_legal.jsonl \
+python src/single_turn_eval/run_sycophancy_inference.py \
+    --input data/variants/sycophancy_variants_legal.jsonl \
     --backend $BACKEND --model "$MODEL" --max-tokens 2048
 
 # 7. Analyze results
-python src/eval/analyze_results.py sycophancy \
-    --file "data/results/sycophancy_${MODEL_SAFE}_legal.jsonl"
+python src/single_turn_eval/analyze_results.py sycophancy \
+    --file "data/results/single_turn/sycophancy_${MODEL_SAFE}_legal.jsonl"
 ```
 
 ## Inference Providers
@@ -276,10 +276,17 @@ Then run inference with `--backend vllm`.
 │   ├── mmlu_professional_law.csv                # Raw MMLU Professional Law
 │   ├── medqa.csv                                # Raw MedQA USMLE
 │   ├── filtered_questions.jsonl                 # Filtered legal questions
-│   ├── sycophancy_variants_legal.jsonl          # 14-variant test sets
-│   ├── sycophancy_variants_medical.jsonl
-│   ├── wrong_cots_*.jsonl                       # Generated wrong COTs
+│   ├── variants/                                # Sycophancy + multiturn variant files
+│   │   ├── sycophancy_variants_legal.jsonl      # 14-variant test sets
+│   │   ├── sycophancy_variants_medical.jsonl
+│   │   └── multiturn_variants_*.jsonl
+│   ├── wrong_cots/                              # Generated wrong COTs
+│   │   └── wrong_cots_*.jsonl
 │   └── results/                                 # Inference outputs + analysis CSVs
+│       ├── baseline/                             # baseline_cot_* files
+│       ├── single_turn/                          # sycophancy_* files
+│       ├── multi_turn/                           # multiturn_sycophancy_* files
+│       └── rebuttal/                             # rebuttal_sycophancy_* files
 ├── src/
 │   ├── config.py                                # Shared constants and utilities
 │   ├── llm_backend.py                           # LLM inference engine (vLLM/litellm)
@@ -290,7 +297,7 @@ Then run inference with `--backend vllm`.
 │   │   ├── filter_questions.py                  # Filter person-centric MCQs
 │   │   ├── generate_cot.py                      # Baseline + wrong COT generation
 │   │   └── build_sycophancy_variants.py         # Build 14-variant sycophancy ladder
-│   └── eval/
+│   └── single_turn_eval/
 │       ├── prompts.py                           # Sycophancy + experiment 1 prompts
 │       ├── run_sycophancy_inference.py          # Run models on variants
 │       └── analyze_results.py                   # Statistical analysis

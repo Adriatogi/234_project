@@ -7,12 +7,12 @@ whether the model defers to wrong suggestions delivered as rebuttals.
 
 Usage:
     python src/rebuttal_eval/run_rebuttal_inference.py \
-        --input data/sycophancy_variants_legal.jsonl \
-        --baseline data/results/baseline_cot_meta-llama_Llama-3.1-8B-Instruct_legal.jsonl \
+        --input data/variants/sycophancy_variants_legal.jsonl \
+        --baseline data/results/baseline/baseline_cot_meta-llama_Llama-3.1-8B-Instruct_legal.jsonl \
         --backend vllm --model meta-llama/Llama-3.1-8B-Instruct
 
 Output:
-    data/results/rebuttal_sycophancy_{model}_{domain}.jsonl
+    data/results/rebuttal/rebuttal_sycophancy_{model}_{domain}.jsonl
 """
 
 import argparse
@@ -69,6 +69,7 @@ def run_rebuttal(
     question_ids: list[int] | None,
     batch_size: int,
     backend: str,
+    resume: bool = False,
     max_tokens: int = 512,
 ):
     variants_df = config.load_jsonl(input_path)
@@ -105,13 +106,13 @@ def run_rebuttal(
     print(f"Variants:   {len(variants_df)}")
     print(f"Questions:  {variants_df['question_id'].nunique()}")
 
-    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    os.makedirs(config.REBUTTAL_RESULTS_DIR, exist_ok=True)
     output_path = os.path.join(
-        config.RESULTS_DIR, f"rebuttal_sycophancy_{model_safe}_{domain}.jsonl"
+        config.REBUTTAL_RESULTS_DIR, f"rebuttal_sycophancy_{model_safe}_{domain}.jsonl"
     )
 
     existing_df, completed_keys = llm_backend.load_existing(
-        output_path, ["question_id", "variant"]
+        output_path, ["question_id", "variant"], resume=resume,
     )
 
     pending = []
@@ -194,7 +195,7 @@ def main():
     )
     parser.add_argument(
         "--baseline", required=True,
-        help="Baseline COT results JSONL (e.g. data/results/baseline_cot_..._legal.jsonl)",
+        help="Baseline COT results JSONL (e.g. data/results/baseline/baseline_cot_..._legal.jsonl)",
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--question-ids", type=str, default=None)
@@ -212,6 +213,7 @@ def main():
         model=args.model, limit=args.limit,
         question_ids=question_ids, batch_size=args.batch_size,
         backend=args.backend, max_tokens=args.max_tokens,
+        resume=args.resume,
     )
 
 

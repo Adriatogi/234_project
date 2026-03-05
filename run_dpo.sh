@@ -17,10 +17,10 @@ BACKEND="vllm"
 # ── 1. Build DPO dataset ─────────────────────────────────────────────────
 echo "=== Step 1: Build DPO dataset ==="
 python src/dataset_generation/build_dpo_dataset.py \
-    --chosen-legal data/results/sycophancy_Qwen_Qwen2.5-7B-Instruct_legal.jsonl \
-    --chosen-medical data/results/sycophancy_Qwen_Qwen2.5-7B-Instruct_medical.jsonl \
-    --rejected-legal data/results/sycophancy_${MODEL_SAFE}_legal.jsonl \
-    --rejected-medical data/results/sycophancy_${MODEL_SAFE}_medical.jsonl
+    --chosen-legal data/results/single_turn/sycophancy_Qwen_Qwen2.5-7B-Instruct_legal.jsonl \
+    --chosen-medical data/results/single_turn/sycophancy_Qwen_Qwen2.5-7B-Instruct_medical.jsonl \
+    --rejected-legal data/results/single_turn/sycophancy_${MODEL_SAFE}_legal.jsonl \
+    --rejected-medical data/results/single_turn/sycophancy_${MODEL_SAFE}_medical.jsonl
 
 # ── 2. Train ──────────────────────────────────────────────────────────────
 echo "=== Step 2: DPO training ==="
@@ -63,23 +63,23 @@ print('Merged model saved to $MERGED_DIR')
 echo "=== Step 4: Sycophancy eval on DPO model ==="
 DPO_MODEL_SAFE="checkpoints_dpo-llama-anti-syco-merged"
 
-python src/eval/run_sycophancy_inference.py \
-    --input data/sycophancy_variants_legal.jsonl \
+python src/single_turn_eval/run_sycophancy_inference.py \
+    --input data/variants/sycophancy_variants_legal.jsonl \
     --backend $BACKEND --model "$MERGED_DIR" --max-tokens 2048
 
-python src/eval/run_sycophancy_inference.py \
-    --input data/sycophancy_variants_medical.jsonl \
+python src/single_turn_eval/run_sycophancy_inference.py \
+    --input data/variants/sycophancy_variants_medical.jsonl \
     --backend $BACKEND --model "$MERGED_DIR" --max-tokens 2048
 
 # ── 5. Analyze ────────────────────────────────────────────────────────────
 echo "=== Step 5: Analysis ==="
-python src/eval/analyze_results.py sycophancy \
-    --file "data/results/sycophancy_${DPO_MODEL_SAFE}_legal.jsonl"
-python src/eval/analyze_results.py sycophancy \
-    --file "data/results/sycophancy_${DPO_MODEL_SAFE}_medical.jsonl"
+python src/single_turn_eval/analyze_results.py sycophancy \
+    --file "data/results/single_turn/sycophancy_${DPO_MODEL_SAFE}_legal.jsonl"
+python src/single_turn_eval/analyze_results.py sycophancy \
+    --file "data/results/single_turn/sycophancy_${DPO_MODEL_SAFE}_medical.jsonl"
 
 echo ""
 echo "=== Done ==="
 echo "Compare before/after:"
-echo "  Before: data/results/analysis_sycophancy_${MODEL_SAFE}_*.csv"
-echo "  After:  data/results/analysis_sycophancy_${DPO_MODEL_SAFE}_*.csv"
+echo "  Before: data/results/single_turn/analysis_sycophancy_${MODEL_SAFE}_*.csv"
+echo "  After:  data/results/single_turn/analysis_sycophancy_${DPO_MODEL_SAFE}_*.csv"

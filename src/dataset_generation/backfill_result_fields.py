@@ -58,7 +58,7 @@ def _find_matching_wrong_cots(
     Raises RuntimeError if no unique match is found.
     """
     candidates = sorted(glob.glob(
-        os.path.join(config.DATA_DIR, f"wrong_cots_*_{domain}.jsonl")
+        os.path.join(config.WRONG_COTS_DIR, f"wrong_cots_*_{domain}.jsonl")
     ))
     matches = []
     for wc_path in candidates:
@@ -126,7 +126,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Validate without writing")
     args = parser.parse_args()
 
-    result_files = sorted(glob.glob(os.path.join(config.RESULTS_DIR, "sycophancy_*_*.jsonl")))
+    result_files = sorted(glob.glob(os.path.join(config.SINGLE_TURN_RESULTS_DIR, "sycophancy_*_*.jsonl")))
     result_files = [f for f in result_files if "analysis_" not in os.path.basename(f)]
     print(f"Found {len(result_files)} result files\n")
 

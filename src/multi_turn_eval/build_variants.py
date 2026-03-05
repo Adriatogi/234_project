@@ -15,7 +15,7 @@ Inputs (auto-discovered from data/):
     baseline_cot_{model_safe}_{domain}.jsonl  → progressive questions + baseline responses
 
 Output:
-    data/multiturn_variants_{model_safe}_{domain}.jsonl
+    data/variants/multiturn_variants_{model_safe}_{domain}.jsonl
 """
 
 import argparse
@@ -26,7 +26,6 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
-from dataset_generation.build_sycophancy_variants import inject_demographic
 from multi_turn_eval.prompts import (
     CITATION_TEMPLATES,
     CORRECT_COT_TEMPLATE,
@@ -55,15 +54,6 @@ for _r in config.RACES:
         (f"sycophancy_authority_race_{_r}", f"A {_r} {{role}}", _r, "none")
     )
 
-# Person demographic conditions (modify question text, neutral authority)
-PERSON_VARIANTS = []
-for _r in config.RACES:
-    for _g in config.GENDERS:
-        PERSON_VARIANTS.append(
-            (f"sycophancy_person_{_r}_{_g}", _r, _g)
-        )
-
-
 def _build_question_variants(
     question_id: int,
     question_text: str,
@@ -90,7 +80,7 @@ def _build_question_variants(
         "direction": direction,
     }
 
-    def _add(variant, level, auth_desc, race, gender, q_text=None):
+    def _add(variant, level, auth_desc, race, gender):
         rows.append({
             **base,
             "variant": variant,
@@ -99,15 +89,10 @@ def _build_question_variants(
             "race": race,
             "gender": gender,
             "citation": citation if level == "citation" else "",
-            **({"question_text": q_text} if q_text else {}),
         })
 
-    # Level 1: simple — one base + person demo variants
+    # Level 1: simple — bare disagreement, no authority
     _add("simple", "simple", "none", "none", "none")
-    for pname, race, gender in PERSON_VARIANTS:
-        injected = inject_demographic(question_text, race, gender)
-        _add(f"simple_person_{race}_{gender}", "simple", "none", race, gender,
-             q_text=injected)
 
     # Levels 2-4: authority / justified / citation
     for level in ESCALATION_LEVELS[1:]:
@@ -115,23 +100,18 @@ def _build_question_variants(
             auth = auth_tmpl.format(role=authority_role)
             _add(vname, level, auth, race, gender)
 
-        for pname, race, gender in PERSON_VARIANTS:
-            injected = inject_demographic(question_text, race, gender)
-            auth = f"A {authority_role}"
-            _add(pname, level, auth, race, gender, q_text=injected)
-
     return rows
 
 
 def build_variants(domain: str, model_safe: str):
     wrong_cots_path = os.path.join(
-        config.DATA_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl"
+        config.WRONG_COTS_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl"
     )
     baseline_path = os.path.join(
-        config.RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl"
+        config.BASELINE_RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl"
     )
     output_path = os.path.join(
-        config.DATA_DIR, f"multiturn_variants_{model_safe}_{domain}.jsonl"
+        config.VARIANTS_DIR, f"multiturn_variants_{model_safe}_{domain}.jsonl"
     )
 
     wc_df = config.load_jsonl(wrong_cots_path)
@@ -187,8 +167,7 @@ def build_variants(domain: str, model_safe: str):
 
     n_levels = len(ESCALATION_LEVELS)
     n_auth = len(AUTHORITY_VARIANTS)
-    n_person = len(PERSON_VARIANTS)
-    variants_per_q = (1 + n_person) + (n_auth + n_person) * (n_levels - 1)
+    variants_per_q = 1 + n_auth * (n_levels - 1)
 
     n_regressive = wc_df["question_id"].nunique()
     n_progressive = incorrect_df["question_id"].nunique()
@@ -196,8 +175,8 @@ def build_variants(domain: str, model_safe: str):
     print(f"\n--- Summary ---")
     print(f"Escalation levels: {ESCALATION_LEVELS}")
     print(f"Variants per question: {variants_per_q}")
-    print(f"  Level 'simple': {1 + n_person} (1 base + {n_person} person demo)")
-    print(f"  Levels 2-4:     {n_auth + n_person} each × {n_levels - 1} levels")
+    print(f"  Level 'simple': 1 (bare disagreement)")
+    print(f"  Levels 2-4:     {n_auth} authority variants each × {n_levels - 1} levels")
     print(f"Regressive questions: {n_regressive} → {n_regressive * variants_per_q} variants")
     print(f"Progressive questions: {n_progressive} → {n_progressive * variants_per_q} variants")
     print(f"Total variants:       {len(out_df)}")

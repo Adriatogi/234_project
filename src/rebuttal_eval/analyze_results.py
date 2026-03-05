@@ -1,11 +1,11 @@
 """
 Statistical analysis of rebuttal sycophancy results.
 
-Adapted from eval/analyze_results.py for rebuttal result files.
+Adapted from single_turn_eval/analyze_results.py for rebuttal result files.
 Output format is identical to single-turn analysis for easy comparison.
 
 Usage:
-    python src/rebuttal_eval/analyze_results.py --file data/results/rebuttal_sycophancy_..._legal.jsonl
+    python src/rebuttal_eval/analyze_results.py --file data/results/rebuttal/rebuttal_sycophancy_..._legal.jsonl
     python src/rebuttal_eval/analyze_results.py   # auto-discover all rebuttal result files
 """
 
@@ -42,8 +42,8 @@ def _load_results(filepath: str) -> pd.DataFrame:
 
 def _discover_files() -> list[str]:
     """Find rebuttal sycophancy result files."""
-    jsonl_files = glob.glob(os.path.join(config.RESULTS_DIR, "rebuttal_sycophancy_*.jsonl"))
-    csv_files = glob.glob(os.path.join(config.RESULTS_DIR, "rebuttal_sycophancy_*.csv"))
+    jsonl_files = glob.glob(os.path.join(config.REBUTTAL_RESULTS_DIR, "rebuttal_sycophancy_*.jsonl"))
+    csv_files = glob.glob(os.path.join(config.REBUTTAL_RESULTS_DIR, "rebuttal_sycophancy_*.csv"))
     all_files = jsonl_files + csv_files
     all_files = [f for f in all_files if "analysis_" not in os.path.basename(f)]
     return sorted(all_files)
@@ -238,6 +238,9 @@ def analyze_rebuttal_sycophancy(filepath: str):
         })
 
     q_df = pd.DataFrame(question_stats).sort_values("total_deference_rate", ascending=False)
+    q_df.insert(0, "total_responses", total_raw)
+    q_df.insert(1, "invalid_count", n_invalid)
+    q_df.insert(2, "invalid_pct", round(n_invalid / total_raw * 100, 2))
 
     print(f"\n--- Per-Question Deference (top 10 most sycophantic) ---")
     print(f"  {'QID':>5} {'Correct':>8} {'Suggested':>10} "
@@ -279,7 +282,7 @@ def analyze_rebuttal_sycophancy(filepath: str):
 
     # --- Save per-question breakdown ---
     basename = os.path.splitext(os.path.basename(filepath))[0]
-    analysis_path = os.path.join(config.RESULTS_DIR, f"analysis_{basename}.csv")
+    analysis_path = os.path.join(config.REBUTTAL_RESULTS_DIR, f"analysis_{basename}.csv")
     q_df.to_csv(analysis_path, index=False)
     print(f"\n  Per-question breakdown saved to {analysis_path}")
 
@@ -299,7 +302,7 @@ def main():
     else:
         result_files = _discover_files()
         if not result_files:
-            print("No rebuttal sycophancy result files found in data/results/")
+            print("No rebuttal sycophancy result files found in data/results/rebuttal/")
             return
         for filepath in result_files:
             analyze_rebuttal_sycophancy(filepath)

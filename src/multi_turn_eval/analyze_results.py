@@ -10,7 +10,7 @@ Key analyses (SycEval-inspired):
   6. Statistical tests (chi-square, Cramer's V, two-proportion z-test)
 
 Usage:
-    python src/multi_turn_eval/analyze_results.py --file data/results/multiturn_sycophancy_..._legal.jsonl
+    python src/multi_turn_eval/analyze_results.py --file data/results/multi_turn/multiturn_sycophancy_..._legal.jsonl
     python src/multi_turn_eval/analyze_results.py   # auto-discover all multiturn result files
 """
 
@@ -48,8 +48,8 @@ def _load_results(filepath: str) -> pd.DataFrame:
 
 
 def _discover_files() -> list[str]:
-    jsonl = glob.glob(os.path.join(config.RESULTS_DIR, "multiturn_sycophancy_*.jsonl"))
-    csv = glob.glob(os.path.join(config.RESULTS_DIR, "multiturn_sycophancy_*.csv"))
+    jsonl = glob.glob(os.path.join(config.MULTI_TURN_RESULTS_DIR, "multiturn_sycophancy_*.jsonl"))
+    csv = glob.glob(os.path.join(config.MULTI_TURN_RESULTS_DIR, "multiturn_sycophancy_*.csv"))
     all_files = jsonl + csv
     all_files = [f for f in all_files if "analysis_" not in os.path.basename(f)]
     return sorted(all_files)
@@ -443,12 +443,25 @@ def analyze_multiturn(filepath: str):
                 row_data[f"n_{level}"] = 0
 
         row_data["total_deference"] = qdf["deferred"].mean()
+        if "sycophantic" in qdf.columns:
+            row_data["sycophantic_rate"] = qdf["sycophantic"].mean()
         question_stats.append(row_data)
 
     q_df = pd.DataFrame(question_stats).sort_values("total_deference", ascending=False)
 
+    reg_df = df[df["direction"] == "regressive"]
+    prog_df = df[df["direction"] == "progressive"]
+    reg_def = reg_df["deferred"].mean() if len(reg_df) > 0 else float("nan")
+    prog_def = prog_df["deferred"].mean() if len(prog_df) > 0 else float("nan")
+
+    q_df.insert(0, "total_responses", total_raw)
+    q_df.insert(1, "invalid_count", n_invalid)
+    q_df.insert(2, "invalid_pct", round(n_invalid / total_raw * 100, 2))
+    q_df.insert(3, "regressive_deference", round(reg_def, 4))
+    q_df.insert(4, "progressive_deference", round(prog_def, 4))
+
     basename = os.path.splitext(os.path.basename(filepath))[0]
-    analysis_path = os.path.join(config.RESULTS_DIR, f"analysis_{basename}.csv")
+    analysis_path = os.path.join(config.MULTI_TURN_RESULTS_DIR, f"analysis_{basename}.csv")
     q_df.to_csv(analysis_path, index=False)
     print(f"\n  Per-question breakdown saved to {analysis_path}")
 
@@ -468,7 +481,7 @@ def main():
     else:
         result_files = _discover_files()
         if not result_files:
-            print("No multiturn sycophancy result files found in data/results/")
+            print("No multiturn sycophancy result files found in data/results/multi_turn/")
             return
         for filepath in result_files:
             analyze_multiturn(filepath)

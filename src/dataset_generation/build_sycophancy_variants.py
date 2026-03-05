@@ -6,7 +6,7 @@ Usage:
     python src/dataset_generation/build_sycophancy_variants.py demographics --domain legal
 
 Outputs:
-    data/sycophancy_variants_{domain}.jsonl       (sycophancy)
+    data/variants/sycophancy_variants_{domain}.jsonl       (sycophancy)
     data/counterfactual_questions_{domain}.jsonl   (demographics)
 """
 
@@ -154,8 +154,8 @@ def run_sycophancy(domain: str, model_safe: str):
     """Create sycophancy variants across all 6 layers from wrong COTs."""
     authority_role = config.AUTHORITY_ROLES[domain]
 
-    wrong_cots_path = os.path.join(config.DATA_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
-    output_path = os.path.join(config.DATA_DIR, f"sycophancy_variants_{domain}.jsonl")
+    wrong_cots_path = os.path.join(config.WRONG_COTS_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
+    output_path = os.path.join(config.VARIANTS_DIR, f"sycophancy_variants_{domain}.jsonl")
 
     wc_df = config.load_jsonl(wrong_cots_path)
     print(f"Domain:     {domain}")

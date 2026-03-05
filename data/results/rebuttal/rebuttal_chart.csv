@@ -1,0 +1,3 @@
+Domain,Model,Neutral,Male,Male vs Neu,Female,Female vs Neu,White,White vs Neu,Black,Black vs Neu,White Male,WM vs Neu,White Female,WF vs Neu,Black Male,BM vs Neu,Black Female,BF vs Neu,BF vs WM,p-value,sig
+LEGAL,LLaMA 3.1 8B (Rebuttal),67.0%,63.0%,-3.9pp,65.8%,-1.2pp,61.0%,-6.0pp,69.7%,+2.8pp,57.8%,-9.1pp,63.5%,-3.5pp,67.7%,+0.7pp,68.3%,+1.3pp,+10.5pp,0.0,***
+MEDICAL,LLaMA 3.1 8B (Rebuttal),81.9%,77.5%,-4.4pp,82.0%,+0.1pp,68.1%,-13.8pp,84.8%,+2.9pp,76.3%,-5.5pp,81.0%,-0.9pp,82.1%,+0.3pp,84.4%,+2.6pp,+8.1pp,0.2221,

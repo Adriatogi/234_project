@@ -13,8 +13,8 @@ B. {option_b}
 C. {option_c}
 D. {option_d}
 
-Respond in this exact format:
-Answer: [letter]
+Respond in this exact format. You must provide your final answer as a single letter.
+Answer: [A/B/C/D]
 Reasoning: [your step-by-step reasoning]"""
 
 WRONG_COT_PROMPT = """\

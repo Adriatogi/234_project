@@ -6,12 +6,11 @@ Usage:
     python src/dataset_generation/generate_cot.py wrong-cot --domain legal --backend vllm --model meta-llama/Llama-3.1-8B-Instruct --baseline <path>
 
 Outputs:
-    data/results/baseline_cot_{model}_{domain}.jsonl
-    data/wrong_cots_{model}_{domain}.jsonl
+    data/results/baseline/baseline_cot_{model}_{domain}.jsonl
+    data/wrong_cots/wrong_cots_{model}_{domain}.jsonl
 """
 
 import argparse
-import ast
 import os
 import re
 import sys
@@ -27,34 +26,16 @@ from dataset_generation.prompts import BASELINE_COT_PROMPT, WRONG_COT_PROMPT
 load_dotenv(os.path.join(config.DATA_DIR, "..", ".env"))
 
 
-DOMAIN_INPUTS = {
-    "legal": {
-        "file": os.path.join(config.DATA_DIR, "mmlu_professional_law.csv"),
-        "text_col": "centerpiece",
-        "correct_fn": lambda row: ast.literal_eval(row["correct_options"])[0],
-    },
-    "medical": {
-        "file": os.path.join(config.DATA_DIR, "medqa.csv"),
-        "text_col": "question",
-        "correct_fn": lambda row: row["answer_idx"],
-    },
+FILTERED_FILES = {
+    "legal": os.path.join(config.DATA_DIR, "filtered_questions.jsonl"),
+    "medical": os.path.join(config.DATA_DIR, "filtered_medqa.jsonl"),
 }
 
 
 def load_questions(domain: str) -> pd.DataFrame:
-    """Load and normalize questions from raw HuggingFace CSVs."""
-    cfg = DOMAIN_INPUTS[domain]
-    df = pd.read_csv(cfg["file"])
-
-    rows = []
-    for idx, row in df.iterrows():
-        rows.append({
-            "question_id": idx,
-            "question_text": row[cfg["text_col"]],
-            "options": config.parse_options(row["options"]),
-            "correct_answer": cfg["correct_fn"](row),
-        })
-    return pd.DataFrame(rows)
+    """Load pre-filtered person-centric questions."""
+    path = FILTERED_FILES[domain]
+    return config.load_jsonl(path)
 
 
 def extract_cot(response_text: str) -> str:
@@ -83,7 +64,7 @@ def format_baseline_prompt(domain: str, question: str, options: list[str]) -> st
 # BASELINE subcommand
 # ===================================================================
 
-def run_baseline(domain: str, model: str, limit: int | None, batch_size: int, backend: str, max_tokens: int = 1024):
+def run_baseline(domain: str, model: str, limit: int | None, batch_size: int, backend: str, max_tokens: int = 1024, resume: bool = False):
     df = load_questions(domain)
     if limit is not None:
         df = df.head(limit)
@@ -94,11 +75,11 @@ def run_baseline(domain: str, model: str, limit: int | None, batch_size: int, ba
     print(f"Questions:  {len(df)}")
     print(f"Batch size: {batch_size}")
 
-    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    os.makedirs(config.BASELINE_RESULTS_DIR, exist_ok=True)
     model_safe = config.safe_model_name(model)
-    output_path = os.path.join(config.RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl")
+    output_path = os.path.join(config.BASELINE_RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl")
 
-    existing_df, completed_ids = llm_backend.load_existing(output_path, ["question_id"])
+    existing_df, completed_ids = llm_backend.load_existing(output_path, ["question_id"], resume=resume)
 
     pending = []
     for _, row in df.iterrows():
@@ -165,7 +146,7 @@ def pick_wrong_answer(correct: str) -> str:
     raise ValueError(f"No wrong answer found for correct={correct}")
 
 
-def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int, backend: str, max_tokens: int = 1024):
+def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int, backend: str, max_tokens: int = 1024, resume: bool = False):
     df = config.load_jsonl(baseline_path)
     correct_df = df[df["is_correct"] == True].copy()
 
@@ -181,9 +162,9 @@ def run_wrong_cot(baseline_path: str, domain: str, model: str, batch_size: int, 
         return
 
     model_safe = config.safe_model_name(model)
-    output_path = os.path.join(config.DATA_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
+    output_path = os.path.join(config.WRONG_COTS_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
 
-    existing_df, completed_ids = llm_backend.load_existing(output_path, ["question_id"])
+    existing_df, completed_ids = llm_backend.load_existing(output_path, ["question_id"], resume=resume)
 
     pending = []
     for _, row in correct_df.iterrows():
@@ -279,12 +260,14 @@ def main():
             domain=args.domain, model=args.model,
             limit=args.limit, batch_size=args.batch_size,
             backend=args.backend, max_tokens=args.max_tokens,
+            resume=args.resume,
         )
     elif args.command == "wrong-cot":
         run_wrong_cot(
             baseline_path=args.baseline, domain=args.domain,
             model=args.model, batch_size=args.batch_size,
             backend=args.backend, max_tokens=args.max_tokens,
+            resume=args.resume,
         )
 
 

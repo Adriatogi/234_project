@@ -2,7 +2,7 @@
 Shared LLM inference engine: backend abstraction (vLLM / litellm),
 resume support, and generic batch loop.
 
-Both dataset_generation/generate_cot.py and eval/run_sycophancy_inference.py
+Both dataset_generation/generate_cot.py and single_turn_eval/run_sycophancy_inference.py
 import from here.
 """
 
@@ -70,10 +70,14 @@ def run_batch(
 # ===================================================================
 
 def load_existing(
-    output_path: str, dedup_cols: list[str],
+    output_path: str, dedup_cols: list[str], *, resume: bool = False,
 ) -> tuple[pd.DataFrame | None, set]:
-    """Load previously saved results for resume support."""
-    if not os.path.exists(output_path):
+    """Load previously saved results for resume support.
+
+    When resume=False (default), starts fresh and ignores any existing file.
+    When resume=True, loads the existing file and skips already-completed keys.
+    """
+    if not resume or not os.path.exists(output_path):
         return None, set()
     existing_df = config.load_jsonl(output_path)
     existing_df = existing_df.drop_duplicates(subset=dedup_cols, keep="first")
@@ -187,7 +191,7 @@ def run_inference_rebuttal(
 
 
 def add_common_args(subparser, default_max_tokens: int):
-    """Add --model, --batch-size, --backend, --max-tokens to a subcommand."""
+    """Add --model, --batch-size, --backend, --max-tokens, --resume to a subcommand."""
     subparser.add_argument("--model", default=config.DEFAULT_MODEL)
     subparser.add_argument("--batch-size", type=int, default=None,
                            help="Batch size for inference. Omit to send all at once (vLLM).")
@@ -195,4 +199,8 @@ def add_common_args(subparser, default_max_tokens: int):
     subparser.add_argument(
         "--backend", required=True, choices=["litellm", "vllm"],
         help="litellm for cloud APIs, vllm for local GPU inference",
+    )
+    subparser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from existing output file instead of overwriting",
     )
