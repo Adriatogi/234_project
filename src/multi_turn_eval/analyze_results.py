@@ -41,6 +41,22 @@ _MODEL_SHORT = {
     "checkpoints_dpo-qwen-selfplay-nocot-merged": "qwen",
 }
 
+_MODEL_ORDER = [
+    "Qwen_Qwen2.5-7B-Instruct",
+    "checkpoints_dpo-qwen-selfplay-nocot-merged",
+    "google_gemma-2-9b-it",
+    "checkpoints_dpo-gemma-selfplay-nocot-merged",
+    "meta-llama_Llama-3.1-8B-Instruct",
+    "checkpoints_dpo-llama-selfplay-nocot-merged",
+]
+
+def _model_sort_key(row: dict) -> int:
+    name = row["Model"]
+    try:
+        return _MODEL_ORDER.index(name)
+    except ValueError:
+        return len(_MODEL_ORDER)
+
 
 def _load_train_qids(model_safe: str, direction: str, domain: str) -> set[int]:
     """Load training question_ids from the DPO manifest for a model/direction/domain."""
@@ -790,7 +806,7 @@ def print_summary_table(simple: bool = False, tsv: bool = False, level: str | No
         print("No data rows found in analysis CSVs.")
         return
 
-    rows.sort(key=lambda r: r["Model"])
+    rows.sort(key=_model_sort_key)
 
     if simple and level:
         level_cols = [
@@ -997,7 +1013,7 @@ def print_accuracy_table(tsv: bool = False, level: str | None = None,
             "sig": _sig_stars(bf_wm_p),
         })
 
-    rows.sort(key=lambda r: r["Model"])
+    rows.sort(key=_model_sort_key)
 
     level_label = f" ({level.upper()} LEVEL)" if level else " (ALL LEVELS)"
     _print_tables_by_domain(rows, f"MULTI-TURN ACCURACY BY DEMOGRAPHIC — REGRESSIVE{level_label}", tsv=tsv)
@@ -1103,7 +1119,7 @@ def print_deference_table(tsv: bool = False, level: str | None = None,
         pooled = pd.concat(dfs, ignore_index=True)
         rows.append(_compute_deference_row(model_safe, domain_label, pooled))
 
-    rows.sort(key=lambda r: r["Model"])
+    rows.sort(key=_model_sort_key)
 
     level_label = f" ({level.upper()})" if level else " (ALL LEVELS)"
     dir_label = direction.upper()

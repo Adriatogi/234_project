@@ -36,6 +36,22 @@ _MODEL_SHORT = {
     "checkpoints_dpo-qwen-selfplay-nocot-merged": "qwen",
 }
 
+_MODEL_ORDER = [
+    "Qwen_Qwen2.5-7B-Instruct",
+    "checkpoints_dpo-qwen-selfplay-nocot-merged",
+    "google_gemma-2-9b-it",
+    "checkpoints_dpo-gemma-selfplay-nocot-merged",
+    "meta-llama_Llama-3.1-8B-Instruct",
+    "checkpoints_dpo-llama-selfplay-nocot-merged",
+]
+
+def _model_sort_key(row: dict) -> int:
+    name = row["Model"]
+    try:
+        return _MODEL_ORDER.index(name)
+    except ValueError:
+        return len(_MODEL_ORDER)
+
 
 def _load_train_qids(model_safe: str, direction: str, domain: str) -> set[int]:
     """Load training question_ids from the DPO manifest for a model/direction/domain."""
@@ -720,7 +736,7 @@ def print_summary_table(simple: bool = False, tsv: bool = False, combined: bool 
             raw_rows.append(merged)
 
     rows = [_format_summary_row(r) for r in raw_rows]
-    rows.sort(key=lambda r: r["Model"])
+    rows.sort(key=_model_sort_key)
 
     if simple:
         _print_tables_by_domain(
@@ -837,9 +853,104 @@ def print_accuracy_table(tsv: bool = False, combined: bool = False,
             "sig": _sig_stars(bf_wm_p),
         })
 
-    rows.sort(key=lambda r: r["Model"])
+    rows.sort(key=_model_sort_key)
 
     _print_tables_by_domain(rows, "SINGLE-TURN ACCURACY BY DEMOGRAPHIC (NO-COT)", tsv=tsv)
+
+
+# ===================================================================
+# Deference table (one row per model)
+# ===================================================================
+
+def _compute_deference_row(model_safe: str, domain_label: str,
+                           df: pd.DataFrame) -> dict:
+    """Compute a deference-table row from a filtered single-turn DataFrame."""
+    auth_neutral = df[df["variant"] == "sycophancy_authority"]
+    auth_demo = df[
+        df["variant"].str.startswith("sycophancy_authority_")
+        & ~df["variant"].str.startswith("sycophancy_authority_gender_")
+        & ~df["variant"].str.startswith("sycophancy_authority_race_")
+    ]
+
+    def _rate(subset):
+        return subset["deferred"].mean() if len(subset) > 0 else float("nan")
+
+    def _pct(v):
+        return f"{v:.1%}" if not np.isnan(v) else "N/A"
+
+    def _diff(v, ref):
+        if np.isnan(v) or np.isnan(ref):
+            return "N/A"
+        d = (v - ref) * 100
+        return f"{d:.1f}pp"
+
+    neu = _rate(auth_neutral)
+    wm_r = _rate(auth_demo[(auth_demo["race"] == "White") & (auth_demo["gender"] == "male")])
+    wf_r = _rate(auth_demo[(auth_demo["race"] == "White") & (auth_demo["gender"] == "female")])
+    bm_r = _rate(auth_demo[(auth_demo["race"] == "Black") & (auth_demo["gender"] == "male")])
+    bf_r = _rate(auth_demo[(auth_demo["race"] == "Black") & (auth_demo["gender"] == "female")])
+
+    n_bf = len(auth_demo[(auth_demo["race"] == "Black") & (auth_demo["gender"] == "female")])
+    n_wm = len(auth_demo[(auth_demo["race"] == "White") & (auth_demo["gender"] == "male")])
+    bf_wm_p = _accuracy_two_prop_z(n_bf, bf_r, n_wm, wm_r)
+
+    return {
+        "Model": model_safe,
+        "Domain": domain_label,
+        "N": len(auth_demo),
+        "Neutral": _pct(neu),
+        "WM": _pct(wm_r), "WM vs Neu": _diff(wm_r, neu),
+        "WF": _pct(wf_r), "WF vs Neu": _diff(wf_r, neu),
+        "BM": _pct(bm_r), "BM vs Neu": _diff(bm_r, neu),
+        "BF": _pct(bf_r), "BF vs Neu": _diff(bf_r, neu),
+        "BF-WM": _diff(bf_r, wm_r),
+        "p-value": f"{bf_wm_p:.4f}" if not np.isnan(bf_wm_p) else "N/A",
+        "sig": _sig_stars(bf_wm_p),
+    }
+
+
+def print_deference_table(tsv: bool = False, direction: str = "regressive",
+                          combined: bool = False, max_questions: int = 0,
+                          split: str = "all"):
+    """Deference per demographic from raw single-turn JSONL results."""
+    prefix = _jsonl_prefix_for_direction(direction)
+    no_cot_pattern = os.path.join(config.SINGLE_TURN_RESULTS_DIR, f"{prefix}*.jsonl")
+    all_files = sorted(glob.glob(no_cot_pattern))
+
+    if not all_files:
+        print(f"No {direction} sycophancy JSONL files found.")
+        return
+
+    groups: dict[tuple[str, str], list[pd.DataFrame]] = {}
+    for fpath in all_files:
+        df = config.load_jsonl(fpath)
+        if df.empty:
+            continue
+        invalid_mask = df["model_answer"].isin(["INVALID", "ERROR"])
+        df = df[~invalid_mask].reset_index(drop=True)
+
+        model_safe = df["model"].iloc[0].replace("/", "_")
+        domain = df["domain"].iloc[0]
+        if model_safe not in FOCUS_MODELS:
+            continue
+        if model_safe in _MODEL_SHORT:
+            df = _apply_split(df, model_safe, direction, domain, split)
+        df = _subsample_questions(df, max_questions)
+        if df.empty:
+            continue
+
+        domain_label = "combined" if combined else domain
+        groups.setdefault((model_safe, domain_label), []).append(df)
+
+    rows = []
+    for (model_safe, domain_label), dfs in groups.items():
+        pooled = pd.concat(dfs, ignore_index=True)
+        rows.append(_compute_deference_row(model_safe, domain_label, pooled))
+
+    rows.sort(key=_model_sort_key)
+
+    dir_label = direction.upper()
+    _print_tables_by_domain(rows, f"SINGLE-TURN DEFERENCE — {dir_label}", tsv=tsv)
 
 
 # ===================================================================
@@ -1082,6 +1193,14 @@ def main():
     p_acc.add_argument("--split", default="all", choices=["train", "test", "all"],
                         help="Filter questions: train=DPO training set, test=held-out, all=no filter")
 
+    p_def = subparsers.add_parser("deference-table", help="Deference per demographic from raw sycophancy results")
+    p_def.add_argument("--tsv", action="store_true")
+    p_def.add_argument("--combined", action="store_true", help="Pool medical + legal into a single combined table")
+    p_def.add_argument("--direction", default="regressive", choices=["regressive", "progressive"])
+    p_def.add_argument("--max-questions", type=int, default=0)
+    p_def.add_argument("--split", required=True, choices=["train", "test", "all"],
+                        help="Filter questions: train=DPO training set, test=held-out, all=no filter")
+
     p_cmp = subparsers.add_parser("comparison-table", help="Before/after DPO comparison table")
     p_cmp.add_argument("--tsv", action="store_true", help="Output tab-separated values for pasting into Google Sheets")
     p_cmp.add_argument("--combined", action="store_true", help="Show only combined (medical+legal pooled) columns")
@@ -1091,6 +1210,12 @@ def main():
                         help="Filter questions: train=DPO training set, test=held-out, all=no filter")
 
     args = parser.parse_args()
+
+    if args.command == "deference-table":
+        print_deference_table(tsv=args.tsv, direction=args.direction,
+                              combined=args.combined, max_questions=args.max_questions,
+                              split=args.split)
+        return
 
     if args.command == "comparison-table":
         print_comparison_table(tsv=args.tsv, combined=args.combined,
