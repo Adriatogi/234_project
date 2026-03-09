@@ -12,6 +12,7 @@ Outputs:
 
 import argparse
 import os
+import random
 import re
 import sys
 
@@ -149,9 +150,44 @@ def run_demographics(domain: str):
 
 DEFAULT_MODEL_SAFE = "together_ai_meta-llama_Meta-Llama-3.1-8B-Instruct-Turbo"
 
+VARIANTS_PER_QUESTION = 9  # 1 neutral + 4 race×gender + 2 gender + 2 race
 
-def run_sycophancy(domain: str, model_safe: str):
-    """Create sycophancy variants across all 6 layers from wrong COTs."""
+
+def _build_authority_variants(base: dict, authority_role: str) -> list[dict]:
+    """Build the 9 authority-only variants for a single question base dict."""
+    v = lambda **kw: {**base, **kw}
+    rows = []
+
+    rows.append(v(variant="sycophancy_authority",
+                  authority_description=f"A {authority_role}"))
+
+    for race in config.RACES:
+        for gender in config.GENDERS:
+            rows.append(v(
+                variant=f"sycophancy_authority_{race}_{gender}",
+                race=race, gender=gender,
+                authority_description=f"A {race} {gender} {authority_role}",
+            ))
+
+    for gender in config.GENDERS:
+        rows.append(v(
+            variant=f"sycophancy_authority_gender_{gender}",
+            gender=gender,
+            authority_description=f"A {gender} {authority_role}",
+        ))
+
+    for race in config.RACES:
+        rows.append(v(
+            variant=f"sycophancy_authority_race_{race}",
+            race=race,
+            authority_description=f"A {race} {authority_role}",
+        ))
+
+    return rows
+
+
+def run_sycophancy(domain: str, model_safe: str, max_questions: int = 0):
+    """Create regressive sycophancy variants (9 authority-only) from wrong COTs."""
     authority_role = config.AUTHORITY_ROLES[domain]
 
     wrong_cots_path = os.path.join(config.WRONG_COTS_DIR, f"wrong_cots_{model_safe}_{domain}.jsonl")
@@ -161,91 +197,151 @@ def run_sycophancy(domain: str, model_safe: str):
     print(f"Domain:     {domain}")
     print(f"Authority:  {authority_role}")
     print(f"Wrong COTs: {len(wc_df)}")
-    print(f"Races:      {config.RACES}")
-    print(f"Genders:    {config.GENDERS}")
+
+    if max_questions > 0 and len(wc_df) > max_questions:
+        wc_df = wc_df.sample(n=max_questions, random_state=42).reset_index(drop=True)
+        print(f"Capped to:  {len(wc_df)} questions (--max-questions {max_questions})")
 
     rows = []
-
     for _, wc_row in wc_df.iterrows():
-        question_text = wc_row["question_text"]
-
         base = {
             "question_id": wc_row["question_id"],
             "variant": None,
             "race": "none",
             "gender": "none",
-            "question_text": question_text,
+            "question_text": wc_row["question_text"],
             "options": wc_row["options"],
             "correct_answer": wc_row["correct_answer"],
             "suggested_answer": wc_row["wrong_answer"],
             "suggested_cot": wc_row["wrong_cot"],
             "authority_description": None,
             "domain": domain,
+            "direction": "regressive",
         }
-        v = lambda **kw: {**base, **kw}
-
-        rows.append(v(variant="sycophancy_user", authority_description="A user"))
-        rows.append(v(variant="sycophancy_authority",
-                      authority_description=f"A {authority_role}"))
-
-        for race in config.RACES:
-            for gender in config.GENDERS:
-                rows.append(v(
-                    variant=f"sycophancy_authority_{race}_{gender}",
-                    race=race, gender=gender,
-                    authority_description=f"A {race} {gender} {authority_role}",
-                ))
-
-        for gender in config.GENDERS:
-            rows.append(v(
-                variant=f"sycophancy_authority_gender_{gender}",
-                gender=gender,
-                authority_description=f"A {gender} {authority_role}",
-            ))
-
-        for race in config.RACES:
-            rows.append(v(
-                variant=f"sycophancy_authority_race_{race}",
-                race=race,
-                authority_description=f"A {race} {authority_role}",
-            ))
-
-        for race in config.RACES:
-            for gender in config.GENDERS:
-                rows.append(v(
-                    variant=f"sycophancy_person_{race}_{gender}",
-                    race=race, gender=gender,
-                    question_text=inject_demographic(question_text, race, gender),
-                    authority_description=f"A {authority_role}",
-                ))
+        rows.extend(_build_authority_variants(base, authority_role))
 
     out_df = pd.DataFrame(rows)
     config.save_jsonl(out_df, output_path)
 
     n_questions = wc_df["question_id"].nunique()
-    n_rg = len(config.RACES) * len(config.GENDERS)
-    n_g = len(config.GENDERS)
-    n_r = len(config.RACES)
-    expected = n_questions * (1 + 1 + n_rg + n_g + n_r + n_rg)
-
     print(f"\nQuestions:  {n_questions}")
-    print(f"Variants per question: {expected // n_questions} "
-          f"(1 user + 1 authority + {n_rg} demo authority + "
-          f"{n_g} gender-only + {n_r} race-only + {n_rg} person demo)")
+    print(f"Variants per question: {VARIANTS_PER_QUESTION}")
     print(f"Total variants: {len(out_df)}")
     print(f"Saved to {output_path}")
 
     print(f"\n--- Variant counts ---")
-    for v, count in out_df["variant"].value_counts().sort_index().items():
-        print(f"  {v}: {count}")
+    for vname, count in out_df["variant"].value_counts().sort_index().items():
+        print(f"  {vname}: {count}")
 
-    person_rows = out_df[out_df["variant"].str.startswith("sycophancy_person")]
-    if len(person_rows) > 0:
-        ex = person_rows.iloc[0]
-        print(f"\n--- Layer 5 example (Q{ex['question_id']}, {ex['variant']}) ---")
-        print(f"  Question: {str(ex['question_text'])[:200]}...")
-        print(f"  Authority: {ex['authority_description']}")
-        print(f"  Suggested: {ex['suggested_answer']}")
+
+def run_progressive(domain: str, model: str, max_questions: int = 500):
+    """Create progressive sycophancy variants (model-specific, 9 authority-only)."""
+    model_safe = model.replace("/", "_")
+    authority_role = config.AUTHORITY_ROLES[domain]
+
+    baseline_path = os.path.join(
+        config.BASELINE_RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl"
+    )
+    output_path = os.path.join(
+        config.VARIANTS_DIR, f"sycophancy_progressive_{model_safe}_{domain}.jsonl"
+    )
+
+    bl_df = config.load_jsonl(baseline_path)
+    incorrect_df = bl_df[bl_df["is_correct"] == False].copy()
+
+    print(f"Domain:     {domain}")
+    print(f"Model:      {model}")
+    print(f"Baseline:   {len(bl_df)} total, {len(incorrect_df)} incorrect (progressive candidates)")
+
+    if max_questions > 0 and len(incorrect_df) > max_questions:
+        incorrect_df = incorrect_df.sample(n=max_questions, random_state=42).reset_index(drop=True)
+        print(f"Capped to:  {len(incorrect_df)} questions (--max-questions {max_questions})")
+
+    rows = []
+    for _, row in incorrect_df.iterrows():
+        correct_letter = row["correct_answer"]
+        base = {
+            "question_id": row["question_id"],
+            "variant": None,
+            "race": "none",
+            "gender": "none",
+            "question_text": row["question_text"],
+            "options": row["options"],
+            "correct_answer": correct_letter,
+            "suggested_answer": correct_letter,
+            "suggested_cot": "",
+            "authority_description": None,
+            "domain": domain,
+            "direction": "progressive",
+        }
+        rows.extend(_build_authority_variants(base, authority_role))
+
+    out_df = pd.DataFrame(rows)
+    config.save_jsonl(out_df, output_path)
+
+    n_questions = incorrect_df["question_id"].nunique()
+    print(f"\nQuestions:  {n_questions}")
+    print(f"Variants per question: {VARIANTS_PER_QUESTION}")
+    print(f"Total variants: {len(out_df)}")
+    print(f"Saved to {output_path}")
+
+
+def run_regressive(domain: str, model: str, max_questions: int = 500):
+    """Create regressive sycophancy variants (model-specific, 9 authority-only, no COT)."""
+    model_safe = model.replace("/", "_")
+    authority_role = config.AUTHORITY_ROLES[domain]
+
+    baseline_path = os.path.join(
+        config.BASELINE_RESULTS_DIR, f"baseline_cot_{model_safe}_{domain}.jsonl"
+    )
+    output_path = os.path.join(
+        config.VARIANTS_DIR, f"sycophancy_regressive_{model_safe}_{domain}.jsonl"
+    )
+
+    bl_df = config.load_jsonl(baseline_path)
+    correct_df = bl_df[bl_df["is_correct"] == True].copy()
+
+    print(f"Domain:     {domain}")
+    print(f"Model:      {model}")
+    print(f"Baseline:   {len(bl_df)} total, {len(correct_df)} correct (regressive candidates)")
+
+    if max_questions > 0 and len(correct_df) > max_questions:
+        correct_df = correct_df.sample(n=max_questions, random_state=42).reset_index(drop=True)
+        print(f"Capped to:  {len(correct_df)} questions (--max-questions {max_questions})")
+
+    rng = random.Random(42)
+    all_letters = config.LETTERS  # ["A", "B", "C", "D"]
+
+    rows = []
+    for _, row in correct_df.iterrows():
+        correct_letter = row["correct_answer"]
+        wrong_letters = [l for l in all_letters if l != correct_letter]
+        wrong_answer = rng.choice(wrong_letters)
+
+        base = {
+            "question_id": row["question_id"],
+            "variant": None,
+            "race": "none",
+            "gender": "none",
+            "question_text": row["question_text"],
+            "options": row["options"],
+            "correct_answer": correct_letter,
+            "suggested_answer": wrong_answer,
+            "suggested_cot": "",
+            "authority_description": None,
+            "domain": domain,
+            "direction": "regressive",
+        }
+        rows.extend(_build_authority_variants(base, authority_role))
+
+    out_df = pd.DataFrame(rows)
+    config.save_jsonl(out_df, output_path)
+
+    n_questions = correct_df["question_id"].nunique()
+    print(f"\nQuestions:  {n_questions}")
+    print(f"Variants per question: {VARIANTS_PER_QUESTION}")
+    print(f"Total variants: {len(out_df)}")
+    print(f"Saved to {output_path}")
 
 
 # ===================================================================
@@ -262,20 +358,47 @@ def main():
     p_demo.add_argument("--domain", required=True, choices=["legal", "medical"])
 
     p_syc = subparsers.add_parser(
-        "sycophancy", help="Create sycophancy test variants from wrong COTs"
+        "sycophancy", help="Create regressive sycophancy variants from wrong COTs (9 authority-only)"
     )
     p_syc.add_argument("--domain", required=True, choices=["legal", "medical"])
     p_syc.add_argument(
         "--model-safe", default=DEFAULT_MODEL_SAFE,
         help="Model-safe name (must match wrong_cots filename)",
     )
+    p_syc.add_argument("--max-questions", type=int, default=0,
+                       help="Cap number of questions (0 = no cap)")
+
+    p_prog = subparsers.add_parser(
+        "progressive", help="Create progressive sycophancy variants (model-specific, 9 authority-only)"
+    )
+    p_prog.add_argument("--domain", required=True, choices=["legal", "medical"])
+    p_prog.add_argument("--model", required=True,
+                        help="HuggingFace model ID (e.g. meta-llama/Llama-3.1-8B-Instruct)")
+    p_prog.add_argument("--max-questions", type=int, default=500,
+                        help="Cap number of questions (default 500, 0 = no cap)")
+
+    p_reg = subparsers.add_parser(
+        "regressive", help="Create regressive sycophancy variants from baseline (model-specific, 9 authority-only, no COT)"
+    )
+    p_reg.add_argument("--domain", required=True, choices=["legal", "medical"])
+    p_reg.add_argument("--model", required=True,
+                       help="HuggingFace model ID (e.g. meta-llama/Llama-3.1-8B-Instruct)")
+    p_reg.add_argument("--max-questions", type=int, default=500,
+                       help="Cap number of questions (default 500, 0 = no cap)")
 
     args = parser.parse_args()
 
     if args.command == "demographics":
         run_demographics(domain=args.domain)
     elif args.command == "sycophancy":
-        run_sycophancy(domain=args.domain, model_safe=args.model_safe)
+        run_sycophancy(domain=args.domain, model_safe=args.model_safe,
+                       max_questions=args.max_questions)
+    elif args.command == "progressive":
+        run_progressive(domain=args.domain, model=args.model,
+                        max_questions=args.max_questions)
+    elif args.command == "regressive":
+        run_regressive(domain=args.domain, model=args.model,
+                       max_questions=args.max_questions)
 
 
 if __name__ == "__main__":

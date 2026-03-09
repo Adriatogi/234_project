@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 import llm_backend
-from single_turn_eval.prompts import SYCOPHANCY_PROMPT, EXPERIMENT1_PROMPTS
+from single_turn_eval.prompts import SYCOPHANCY_PROMPT, SYCOPHANCY_NO_COT_PROMPT, EXPERIMENT1_PROMPTS
 
 load_dotenv(os.path.join(config.DATA_DIR, "..", ".env"))
 
@@ -54,6 +54,20 @@ def format_prompt_sycophancy(row: pd.Series, options: list[str]) -> str:
     )
 
 
+def format_prompt_sycophancy_no_cot(row: pd.Series, options: list[str]) -> str:
+    domain = row["domain"]
+    return SYCOPHANCY_NO_COT_PROMPT.format(
+        domain_expert=config.DOMAIN_EXPERTS[domain],
+        question=row["question_text"],
+        option_a=options[0],
+        option_b=options[1],
+        option_c=options[2],
+        option_d=options[3],
+        authority_description=row["authority_description"],
+        suggested_answer=row["suggested_answer"],
+    )
+
+
 def run_sycophancy(
     input_path: str,
     model: str,
@@ -69,7 +83,7 @@ def run_sycophancy(
     is_sycophancy = "authority_description" in df.columns
 
     template = None
-    if prompt_name == "sycophancy":
+    if prompt_name in ("sycophancy", "sycophancy_no_cot"):
         if not is_sycophancy:
             raise ValueError(
                 "Input lacks 'authority_description' column — "
@@ -98,8 +112,17 @@ def run_sycophancy(
 
     if is_sycophancy and "domain" in df.columns:
         domain = df["domain"].iloc[0]
+        direction = df["direction"].iloc[0] if "direction" in df.columns else "regressive"
+        if prompt_name == "sycophancy_no_cot":
+            prefix_map = {"progressive": "sycophancy_progressive_no_cot",
+                          "regressive": "sycophancy_regressive_no_cot"}
+            file_prefix = prefix_map[direction]
+        else:
+            prefix_map = {"progressive": "sycophancy_progressive",
+                          "regressive": "sycophancy_regressive"}
+            file_prefix = prefix_map[direction]
         output_path = os.path.join(
-            config.SINGLE_TURN_RESULTS_DIR, f"sycophancy_{model_safe}_{domain}.jsonl"
+            config.SINGLE_TURN_RESULTS_DIR, f"{file_prefix}_{model_safe}_{domain}.jsonl"
         )
     else:
         output_path = os.path.join(
@@ -124,6 +147,8 @@ def run_sycophancy(
 
         if prompt_name == "sycophancy":
             prompt = format_prompt_sycophancy(row, options)
+        elif prompt_name == "sycophancy_no_cot":
+            prompt = format_prompt_sycophancy_no_cot(row, options)
         else:
             prompt = format_prompt_standard(template, row["question_text"], options)
 
@@ -182,8 +207,8 @@ def run_sycophancy(
 def main():
     parser = argparse.ArgumentParser(description="Run sycophancy/experiment1 inference")
     parser.add_argument("--input", required=True, help="Input JSONL of question variants")
-    parser.add_argument("--prompt", default="sycophancy",
-                        choices=["baseline", "with_explanation", "debiasing", "sycophancy"])
+    parser.add_argument("--prompt", default="sycophancy_no_cot",
+                        choices=["baseline", "with_explanation", "debiasing", "sycophancy", "sycophancy_no_cot"])
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--question-ids", type=str, default=None)
     llm_backend.add_common_args(parser, default_max_tokens=512)

@@ -1,22 +1,13 @@
 """
-DPO fine-tuning of LLaMA 3.1 8B to resist sycophancy using QLoRA.
-
-Trains on preference pairs where:
-  - chosen = non-sycophantic response (from Qwen)
-  - rejected = sycophantic response (from LLaMA)
+DPO fine-tuning with QLoRA to reduce sycophancy / demographic bias.
 
 Usage:
     python src/train_dpo.py \
-        --train-file data/dpo_train.jsonl \
-        --val-file data/dpo_val.jsonl \
-        --output-dir checkpoints/dpo-llama-anti-syco
-
-    python src/train_dpo.py \
-        --train-file data/dpo_train.jsonl \
-        --val-file data/dpo_val.jsonl \
-        --output-dir checkpoints/dpo-llama-anti-syco \
-        --wandb-project dpo-anti-sycophancy \
-        --epochs 3
+        --train-file data/dpo_selfplay_llama_nocot_train.jsonl \
+        --val-file data/dpo_selfplay_llama_nocot_val.jsonl \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --output-dir checkpoints/dpo-llama-selfplay-nocot \
+        --epochs 3 --grad-accum 2 --eval-steps 10 --patience 4
 """
 
 import argparse
@@ -27,7 +18,7 @@ import torch
 import wandb
 from datasets import Dataset
 from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, EarlyStoppingCallback
 from trl import DPOConfig, DPOTrainer
 
 
@@ -59,6 +50,12 @@ def main():
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--max-steps", type=int, default=-1, help="Max training steps (-1 = use epochs)")
+    parser.add_argument("--eval-steps", type=int, default=0,
+                        help="Evaluate every N steps (0 = eval per epoch instead)")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stopping patience in eval rounds (0 = no early stopping)")
+    parser.add_argument("--patience-threshold", type=float, default=0.0,
+                        help="Min improvement in eval loss to reset patience counter (e.g. 0.01)")
     parser.add_argument("--wandb-project", default="dpo-anti-sycophancy")
     parser.add_argument("--run-name", default=None, help="W&B run name (defaults to output_dir basename)")
     args = parser.parse_args()
@@ -101,6 +98,27 @@ def main():
         task_type="CAUSAL_LM",
     )
 
+    use_step_eval = args.eval_steps > 0 and args.max_steps <= 0
+
+    if use_step_eval:
+        eval_strategy = "steps"
+        save_strategy = "steps"
+        eval_steps = args.eval_steps
+        save_steps = args.eval_steps
+        logging_steps = args.eval_steps
+    elif args.max_steps > 0:
+        eval_strategy = "no"
+        save_strategy = "no"
+        eval_steps = None
+        save_steps = None
+        logging_steps = 1
+    else:
+        eval_strategy = "epoch"
+        save_strategy = "epoch"
+        eval_steps = None
+        save_steps = None
+        logging_steps = 10
+
     training_args = DPOConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -111,10 +129,15 @@ def main():
         learning_rate=args.lr,
         beta=args.beta,
         max_length=args.max_length,
-        logging_steps=1 if args.max_steps > 0 else 10,
-        eval_strategy="no" if args.max_steps > 0 else "epoch",
-        save_strategy="no" if args.max_steps > 0 else "epoch",
-        save_total_limit=2,
+        logging_steps=logging_steps,
+        eval_strategy=eval_strategy,
+        eval_steps=eval_steps,
+        save_strategy=save_strategy,
+        save_steps=save_steps,
+        save_total_limit=3,
+        load_best_model_at_end=use_step_eval,
+        metric_for_best_model="eval_loss" if use_step_eval else None,
+        greater_is_better=False if use_step_eval else None,
         bf16=True,
         report_to="wandb",
         run_name=run_name,
@@ -124,6 +147,14 @@ def main():
         lr_scheduler_type="cosine",
     )
 
+    callbacks = []
+    if use_step_eval and args.patience > 0:
+        callbacks.append(EarlyStoppingCallback(
+            early_stopping_patience=args.patience,
+            early_stopping_threshold=args.patience_threshold,
+        ))
+        print(f"Early stopping enabled: patience={args.patience}, threshold={args.patience_threshold} (eval every {args.eval_steps} steps)")
+
     print("Initializing DPO trainer...")
     trainer = DPOTrainer(
         model=model,
@@ -132,6 +163,7 @@ def main():
         eval_dataset=val_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        callbacks=callbacks,
     )
 
     print("Starting training...")
