@@ -99,19 +99,29 @@ def build_cross_model_pairs(chosen_path: str, rejected_path: str) -> list[dict]:
 
 # ── self-play mode ────────────────────────────────────────────────────────
 
-def build_selfplay_pairs(model_path: str, max_questions: int = 0) -> list[dict]:
-    """Build DPO pairs from BF vs WM differential within a single model's results."""
+def build_selfplay_pairs(model_path: str, max_questions: int = 0,
+                         direction: str = "regressive") -> tuple[list[dict], list[int]]:
+    """Build DPO pairs from BF vs WM differential within a single model's results.
+
+    For regressive (deference = bad): chosen = non-deferring response.
+    For progressive (deference = good): chosen = deferring response.
+
+    Returns (pairs, selected_question_ids) where selected_question_ids is the
+    list of question_ids that were considered for pair building (for manifest).
+    """
     data = _load_keyed(model_path)
 
     question_ids = sorted({qid for (qid, _) in data.keys()})
     if max_questions > 0 and len(question_ids) > max_questions:
         random.seed(42)
-        question_ids = set(random.sample(question_ids, max_questions))
+        question_ids = sorted(random.sample(question_ids, max_questions))
     else:
-        question_ids = set(question_ids)
+        question_ids = sorted(question_ids)
+
+    selected_qids = list(question_ids)
 
     pairs = []
-    for qid in sorted(question_ids):
+    for qid in question_ids:
         bf_key = (qid, BF_VARIANT)
         wm_key = (qid, WM_VARIANT)
         if bf_key not in data or wm_key not in data:
@@ -132,18 +142,31 @@ def build_selfplay_pairs(model_path: str, max_questions: int = 0) -> list[dict]:
             continue
 
         if bf_deferred and not wm_deferred:
-            # Typical: model caves to BF, resists WM
-            # Teach: when you see BF authority, respond like you did for WM
-            prompt = _reconstruct_prompt(bf_row)
-            chosen = wm_row["raw_response"]
-            rejected = bf_row["raw_response"]
             pattern = "BF_caved"
+            if direction == "progressive":
+                # BF correctly accepted the right answer, WM stubbornly refused
+                # Teach: when you see WM authority, accept like BF did
+                prompt = _reconstruct_prompt(wm_row)
+                chosen = bf_row["raw_response"]
+                rejected = wm_row["raw_response"]
+            else:
+                # Regressive: BF wrongly caved to wrong answer, WM correctly resisted
+                prompt = _reconstruct_prompt(bf_row)
+                chosen = wm_row["raw_response"]
+                rejected = bf_row["raw_response"]
         else:
-            # Reverse: model caves to WM, resists BF
-            prompt = _reconstruct_prompt(wm_row)
-            chosen = bf_row["raw_response"]
-            rejected = wm_row["raw_response"]
             pattern = "WM_caved"
+            if direction == "progressive":
+                # WM correctly accepted the right answer, BF stubbornly refused
+                # Teach: when you see BF authority, accept like WM did
+                prompt = _reconstruct_prompt(bf_row)
+                chosen = wm_row["raw_response"]
+                rejected = bf_row["raw_response"]
+            else:
+                # Regressive: WM wrongly caved, BF correctly resisted
+                prompt = _reconstruct_prompt(wm_row)
+                chosen = bf_row["raw_response"]
+                rejected = wm_row["raw_response"]
 
         pairs.append({
             "prompt": prompt,
@@ -154,7 +177,7 @@ def build_selfplay_pairs(model_path: str, max_questions: int = 0) -> list[dict]:
             "pattern": pattern,
         })
 
-    return pairs
+    return pairs, selected_qids
 
 
 # ── shared output logic ───────────────────────────────────────────────────
@@ -204,6 +227,8 @@ def main():
                         help="Prompt template for reconstructed prompts (cot includes reasoning, no-cot does not)")
     p_self.add_argument("--max-questions", type=int, default=500,
                         help="Cap questions per direction per domain (default 500, 0 = no cap)")
+    p_self.add_argument("--legacy-pairs", action="store_true",
+                        help="V3 behavior: always treat deference as bad (ignore direction for chosen/rejected)")
 
     for p in [p_cross, p_self]:
         p.add_argument("--val-fraction", type=float, default=0.1)
@@ -230,22 +255,34 @@ def main():
         max_q = args.max_questions
 
         pairs_by_direction: dict[str, list[dict]] = {}
+        manifest: dict[str, dict[str, list[int]]] = {}
         for direction, prefix in [("regressive", file_prefix), ("progressive", prog_prefix)]:
             dir_pairs = []
+            manifest[direction] = {}
             for domain in ["legal", "medical"]:
                 path = os.path.join(args.results_dir, f"{prefix}_{model_safe}_{domain}.jsonl")
                 if not os.path.exists(path):
                     print(f"[{direction}] {domain}: file not found, skipping ({path})")
                     continue
-                pairs = build_selfplay_pairs(path, max_questions=max_q)
+                pair_direction = "regressive" if args.legacy_pairs else direction
+                pairs, selected_qids = build_selfplay_pairs(path, max_questions=max_q, direction=pair_direction)
+                manifest[direction][domain] = selected_qids
                 for p in pairs:
                     p["direction"] = direction
                 bf_caved = sum(1 for p in pairs if p["pattern"] == "BF_caved")
                 wm_caved = len(pairs) - bf_caved
-                print(f"[{direction}] {domain}: {len(pairs)} pairs (BF caved: {bf_caved}, WM caved: {wm_caved})")
+                print(f"[{direction}] {domain}: {len(pairs)} pairs from {len(selected_qids)} questions (BF caved: {bf_caved}, WM caved: {wm_caved})")
                 dir_pairs.extend(pairs)
             print(f"[{direction}] total: {len(dir_pairs)} pairs")
             pairs_by_direction[direction] = dir_pairs
+
+        manifest_path = os.path.join(args.output_dir, f"{args.output_prefix}_train_question_ids.json")
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+        print(f"\nManifest saved: {manifest_path}")
+        for direction, domains in manifest.items():
+            for domain, qids in domains.items():
+                print(f"  {direction}/{domain}: {len(qids)} training question_ids")
 
         groups = [v for v in pairs_by_direction.values() if v]
         if len(groups) >= 2:

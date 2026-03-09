@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import glob
+import json
 import os
 import sys
 
@@ -25,6 +26,40 @@ from scipy.stats import chi2_contingency
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+
+
+# ---------------------------------------------------------------------------
+# Train/test split helpers (held-out evaluation)
+# ---------------------------------------------------------------------------
+
+_MODEL_SHORT = {
+    "meta-llama_Llama-3.1-8B-Instruct": "llama",
+    "google_gemma-2-9b-it": "gemma",
+    "Qwen_Qwen2.5-7B-Instruct": "qwen",
+    "checkpoints_dpo-llama-selfplay-nocot-merged": "llama",
+    "checkpoints_dpo-gemma-selfplay-nocot-merged": "gemma",
+    "checkpoints_dpo-qwen-selfplay-nocot-merged": "qwen",
+}
+
+
+def _load_train_qids(model_safe: str, direction: str, domain: str) -> set[int]:
+    """Load training question_ids from the DPO manifest for a model/direction/domain."""
+    short = _MODEL_SHORT[model_safe]
+    manifest_path = os.path.join(config.DATA_DIR, f"dpo_selfplay_{short}_nocot_train_question_ids.json")
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    return set(manifest[direction][domain])
+
+
+def _apply_split(df: pd.DataFrame, model_safe: str, direction: str,
+                 domain: str, split: str) -> pd.DataFrame:
+    """Filter DataFrame by train/test/all split using the DPO training manifest."""
+    if split == "all":
+        return df
+    train_qids = _load_train_qids(model_safe, direction, domain)
+    if split == "train":
+        return df[df["question_id"].isin(train_qids)].reset_index(drop=True)
+    return df[~df["question_id"].isin(train_qids)].reset_index(drop=True)
 
 LEVEL_ORDER = ["simple", "authority", "justified", "citation"]
 
@@ -1028,7 +1063,7 @@ def _compute_deference_row(model_safe: str, domain_label: str,
 
 def print_deference_table(tsv: bool = False, level: str | None = None,
                           direction: str = "regressive", combined: bool = False,
-                          max_questions: int = 0):
+                          max_questions: int = 0, split: str = "all"):
     """Deference per demographic from raw multi-turn JSONL results."""
     result_files = _discover_files()
     if not result_files:
@@ -1044,7 +1079,6 @@ def print_deference_table(tsv: bool = False, level: str | None = None,
             continue
         invalid_mask = df["model_answer"].isin(["INVALID", "ERROR"])
         df = df[~invalid_mask].reset_index(drop=True)
-        df = _subsample_questions(df, max_questions)
 
         model = df["model"].iloc[0]
         domain = df["domain"].iloc[0] if "domain" in df.columns else "unknown"
@@ -1053,6 +1087,9 @@ def print_deference_table(tsv: bool = False, level: str | None = None,
             continue
 
         sub = df[df["direction"] == direction]
+        if model_safe in _MODEL_SHORT:
+            sub = _apply_split(sub, model_safe, direction, domain, split)
+        sub = _subsample_questions(sub, max_questions)
         if level:
             sub = sub[sub["escalation_level"] == level]
         if sub.empty:
@@ -1205,7 +1242,8 @@ def _print_comparison_sections(all_sections: list[tuple[str, list[dict]]], tsv: 
 def print_comparison_table(tsv: bool = False, combined: bool = False,
                            direction: str = "regressive",
                            level: str | None = None,
-                           max_questions: int = 0):
+                           max_questions: int = 0,
+                           split: str = "all"):
     """Before/after DPO comparison table for multi-turn deference."""
     result_files = _discover_files()
     if not result_files:
@@ -1221,11 +1259,13 @@ def print_comparison_table(tsv: bool = False, combined: bool = False,
             continue
         invalid_mask = df["model_answer"].isin(["INVALID", "ERROR"])
         df = df[~invalid_mask].reset_index(drop=True)
-        df = _subsample_questions(df, max_questions)
         model_safe = df["model"].iloc[0].replace("/", "_")
         domain = df["domain"].iloc[0] if "domain" in df.columns else "unknown"
 
         sub = df[df["direction"] == direction]
+        if model_safe in _MODEL_SHORT:
+            sub = _apply_split(sub, model_safe, direction, domain, split)
+        sub = _subsample_questions(sub, max_questions)
         if level:
             sub = sub[sub["escalation_level"] == level]
         if sub.empty:
@@ -1311,6 +1351,8 @@ def main():
     p_def.add_argument("--tsv", action="store_true")
     p_def.add_argument("--combined", action="store_true", help="Pool medical + legal into a single combined table")
     p_def.add_argument("--max-questions", type=int, default=0, help="Subsample to N questions per file (0 = no cap)")
+    p_def.add_argument("--split", default="all", choices=["train", "test", "all"],
+                        help="Filter questions: train=DPO training set, test=held-out, all=no filter")
 
     p_cmp = subparsers.add_parser("comparison-table", help="Before/after DPO comparison table")
     p_cmp.add_argument("--tsv", action="store_true", help="Output tab-separated values for pasting into Google Sheets")
@@ -1318,6 +1360,8 @@ def main():
     p_cmp.add_argument("--direction", type=str, default="regressive", choices=["regressive", "progressive"])
     p_cmp.add_argument("--level", type=str, default=None, choices=["simple", "authority", "justified", "citation"])
     p_cmp.add_argument("--max-questions", type=int, default=0, help="Subsample to N questions per file (0 = no cap)")
+    p_cmp.add_argument("--split", required=True, choices=["train", "test", "all"],
+                        help="Filter questions: train=DPO training set, test=held-out, all=no filter")
 
     # Support legacy usage: no subcommand + optional --file
     parser.add_argument("--file", type=str, default=None, help="Specific result file to analyze")
@@ -1329,6 +1373,7 @@ def main():
             tsv=args.tsv, combined=args.combined,
             direction=args.direction, level=args.level,
             max_questions=args.max_questions,
+            split=args.split,
         )
         return
 
@@ -1337,6 +1382,7 @@ def main():
             tsv=args.tsv, level=args.level,
             direction=args.direction, combined=args.combined,
             max_questions=args.max_questions,
+            split=getattr(args, "split", "all"),
         )
         return
 
