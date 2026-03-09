@@ -167,21 +167,30 @@ Then re-run inference (Step 4) using the merged model path instead of the base m
 
 ### Step 8: Analysis
 
+**Deference tables** (one row per model, deference rates by demographic):
+
 ```bash
-# Single-turn regressive (held-out)
-python src/single_turn_eval/analyze_results.py comparison-table --tsv --combined --split test
+# Single-turn regressive deference (held-out)
+python src/single_turn_eval/analyze_results.py deference-table --tsv --combined --split test
 
-# Single-turn progressive (held-out)
-python src/single_turn_eval/analyze_results.py comparison-table --tsv --combined --direction progressive --split test
+# Single-turn progressive deference (held-out)
+python src/single_turn_eval/analyze_results.py deference-table --tsv --combined --direction progressive --split test
 
-# Multi-turn regressive (held-out)
-python src/multi_turn_eval/analyze_results.py comparison-table --tsv --combined --direction regressive --split test
+# Multi-turn regressive deference (held-out)
+python src/multi_turn_eval/analyze_results.py deference-table --tsv --combined --direction regressive --split test
 
-# Multi-turn progressive (held-out)
-python src/multi_turn_eval/analyze_results.py comparison-table --tsv --combined --direction progressive --split test
+# Multi-turn progressive deference (held-out)
+python src/multi_turn_eval/analyze_results.py deference-table --tsv --combined --direction progressive --split test
 ```
 
-The `--split` flag is **required** for `comparison-table` and `accuracy-table`. It uses the DPO training manifests to partition questions:
+**Comparison tables** (before/after DPO with deltas):
+
+```bash
+python src/single_turn_eval/analyze_results.py comparison-table --tsv --combined --split test
+python src/multi_turn_eval/analyze_results.py comparison-table --tsv --combined --direction regressive --split test
+```
+
+The `--split` flag is **required** for `deference-table`, `comparison-table`, and `accuracy-table`. It uses the DPO training manifests to partition questions:
 - `--split test`: Only held-out questions (not seen during DPO training)
 - `--split train`: Only training questions
 - `--split all`: All questions
